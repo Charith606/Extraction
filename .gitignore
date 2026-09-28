@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest cache
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Large uploaded syllabi (optional to exclude heavy binaries)
+uploaded_syllabi/*.pdf
+!uploaded_syllabi/.gitkeep
+
+# Logs
+*.log
