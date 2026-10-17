@@ -6,6 +6,9 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 import requests
 
 
+from .config import config
+
+
 class LLMEngine:
     """
     Multi-provider LLM Engine for Syllabus Extraction:
@@ -25,7 +28,8 @@ class LLMEngine:
         model: Optional[str] = None,
         base_url: Optional[str] = None
     ):
-        self.provider = (provider or os.environ.get("LLM_PROVIDER") or self._detect_provider()).lower()
+        detected_or_cfg = config.primary_provider if config.primary_provider != "auto" else self._detect_provider()
+        self.provider = (provider or os.environ.get("LLM_PROVIDER") or detected_or_cfg).lower()
         self.api_key = api_key or self._detect_api_key(self.provider)
         self.model = model or os.environ.get("LLM_MODEL") or self._default_model(self.provider)
         self.base_url = base_url or os.environ.get("LLM_BASE_URL") or self._default_base_url(self.provider)
@@ -34,17 +38,17 @@ class LLMEngine:
     def _detect_provider(self) -> str:
         if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
             return "gemini"
+        if os.environ.get("GROQ_API_KEY"):
+            return "groq"
         if os.environ.get("OPENAI_API_KEY"):
             return "openai"
         if os.environ.get("ANTHROPIC_API_KEY"):
             return "anthropic"
-        if os.environ.get("GROQ_API_KEY"):
-            return "groq"
         if os.environ.get("DEEPSEEK_API_KEY"):
             return "deepseek"
         if os.environ.get("OLLAMA_HOST"):
             try:
-                res = requests.get(f"{os.environ.get('OLLAMA_HOST')}/api/tags", timeout=0.1)
+                res = requests.get(f"{os.environ.get('OLLAMA_HOST', config.ollama_host)}/api/tags", timeout=0.1)
                 if res.status_code == 200:
                     return "ollama"
             except Exception:
@@ -66,17 +70,17 @@ class LLMEngine:
 
     def _default_model(self, provider: str) -> str:
         if provider == "gemini":
-            return "gemini-1.5-flash"  # Ultra-lightweight & fast
+            return config.gemini_model  # e.g. gemini-1.5-flash / gemini-2.0-flash
         if provider == "openai":
-            return "gpt-4o-mini"        # Lightweight mini model
+            return config.openai_model  # e.g. gpt-4o-mini
         if provider == "anthropic":
-            return "claude-3-haiku-20240307"  # Lightweight haiku
+            return config.claude_primary_model  # e.g. claude-3-5-haiku-latest
         if provider == "groq":
-            return "llama-3.1-8b-instant"     # Lightweight 8B instant model
+            return config.groq_model  # e.g. llama-3.3-70b-versatile (upgraded from 8B)
         if provider == "deepseek":
-            return "deepseek-chat"
+            return config.deepseek_model
         if provider == "ollama":
-            return "llama3.2"                 # Low-resource local model (1B/3B)
+            return config.ollama_model  # e.g. qwen2.5:7b (upgraded from 3B)
         return "heuristic-engine"
 
     def _default_base_url(self, provider: str) -> str:

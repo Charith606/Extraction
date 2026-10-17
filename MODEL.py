@@ -320,6 +320,14 @@ class SyllabusModel:
 
         return None
 
+    def find_reference_subtopic(self, book_pdf_path: str, subtopic: str, hint_chapter: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Locates a specific subtopic inside a reference book PDF with starting and ending pages,
+        even if omitted from the book's index/table of contents.
+        """
+        from reference_book_engine import find_subtopic_in_book
+        return find_subtopic_in_book(book_pdf_path, subtopic, hint_chapter)
+
 
 if __name__ == "__main__":
     import sys

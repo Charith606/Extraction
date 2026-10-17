@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Tuple, Any, Union
 from .reader import PDFDocumentReader, PDFPage
 from .models import (
     CourseMeta, TopicEntry, UnitEntry, CourseOutcome,
-    ProgrammeOutcome, COPOMappingEntry, BookEntry, Task2Response
+    ProgrammeOutcome, COPOMappingEntry, BookEntry, Task1Response, Task2Response
 )
 from .task2_bloom import normalize_printed_bloom, infer_bloom_from_text
 from .task1_discovery import CourseDiscoveryEngine
@@ -39,12 +39,12 @@ class CourseDetailExtractor:
     PO_REGEX = re.compile(r"^(PO\s*[-–—:\._]?\s*0*(\d+))\s*[-–—:\._]*\s*(.*)$", re.IGNORECASE)
     PSO_REGEX = re.compile(r"^(PSO\s*[-–—:\._]?\s*0*(\d+))\s*[-–—:\._]*\s*(.*)$", re.IGNORECASE)
 
-    def __init__(self, reader: PDFDocumentReader, llm_engine: Optional[LLMEngine] = None):
+    def __init__(self, reader: PDFDocumentReader, llm_engine: Optional[LLMEngine] = None, discovery_resp: Optional[Task1Response] = None):
         self.reader = reader
         self.pages = reader.pages
         self.filename = reader.filename
         self.cached_pos: Optional[List[ProgrammeOutcome]] = None
-        self._cached_discovery: Optional[Task1Response] = None
+        self._cached_discovery: Optional[Task1Response] = discovery_resp
         self.llm_engine = llm_engine or LLMEngine()
         self.boundary_helper = LLMLineRangeBoundaryHelper(llm_engine=self.llm_engine)
 

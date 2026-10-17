@@ -4,11 +4,14 @@ from itertools import groupby
 from typing import List, Dict, Any, Optional, Tuple
 import pymupdf
 
+import io
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 # Optional OCR support
 try:
     import pytesseract
     from PIL import Image
-    import io
 
     common_tesseract_paths = [
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
@@ -23,6 +26,85 @@ try:
     OCR_AVAILABLE = True
 except ImportError:
     OCR_AVAILABLE = False
+
+try:
+    from winsdk.windows.graphics.imaging import BitmapDecoder
+    from winsdk.windows.storage.streams import InMemoryRandomAccessStream, DataWriter
+    from winsdk.windows.media.ocr import OcrEngine
+    WINSDK_OCR_AVAILABLE = True
+    _ocr_engine_instance = OcrEngine.try_create_from_user_profile_languages()
+except ImportError:
+    WINSDK_OCR_AVAILABLE = False
+    _ocr_engine_instance = None
+
+_OCR_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".ocr_cache")
+
+
+async def _async_winsdk_ocr(png_bytes: bytes) -> str:
+    global _ocr_engine_instance
+    if _ocr_engine_instance is None:
+        _ocr_engine_instance = OcrEngine.try_create_from_user_profile_languages()
+    stream = InMemoryRandomAccessStream()
+    writer = DataWriter(stream)
+    writer.write_bytes(png_bytes)
+    await writer.store_async()
+    await writer.flush_async()
+    writer.detach_stream()
+    stream.seek(0)
+    decoder = await BitmapDecoder.create_async(stream)
+    bitmap = await decoder.get_software_bitmap_async()
+    res = await _ocr_engine_instance.recognize_async(bitmap)
+    return res.text or ""
+
+
+def _ocr_pixmap(pix, cache_key: Optional[str] = None) -> str:
+    if cache_key:
+        os.makedirs(_OCR_CACHE_DIR, exist_ok=True)
+        safe_key = re.sub(r"[^a-zA-Z0-9_\-]", "_", cache_key)
+        cache_file = os.path.join(_OCR_CACHE_DIR, f"{safe_key}.txt")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+
+    ocr_text = ""
+    png_bytes = pix.tobytes("png")
+
+    if WINSDK_OCR_AVAILABLE:
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+
+            if loop and loop.is_running():
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    ocr_text = executor.submit(lambda: asyncio.run(_async_winsdk_ocr(png_bytes))).result()
+            else:
+                ocr_text = asyncio.run(_async_winsdk_ocr(png_bytes))
+        except Exception:
+            ocr_text = ""
+
+    if not ocr_text and OCR_AVAILABLE:
+        try:
+            img = Image.open(io.BytesIO(png_bytes))
+            ocr_text = pytesseract.image_to_string(img)
+        except Exception:
+            ocr_text = ""
+
+    if cache_key and ocr_text:
+        try:
+            os.makedirs(_OCR_CACHE_DIR, exist_ok=True)
+            safe_key = re.sub(r"[^a-zA-Z0-9_\-]", "_", cache_key)
+            cache_file = os.path.join(_OCR_CACHE_DIR, f"{safe_key}.txt")
+            with open(cache_file, "w", encoding="utf-8") as f:
+                f.write(ocr_text)
+        except Exception:
+            pass
+
+    return ocr_text
 
 
 class PDFPage:
@@ -103,9 +185,9 @@ class PDFDocumentReader:
 
     def _load_pages(self):
         doc = pymupdf.open(self.pdf_path)
-        # Determine if document has a digital text layer across sample pages
-        sample_text_len = sum(len(page.get_text().strip()) for page in doc[:min(5, len(doc))])
-        is_scanned_doc = sample_text_len < 100
+        file_stat = os.stat(self.pdf_path) if os.path.exists(self.pdf_path) else None
+        base_name = os.path.basename(self.pdf_path)
+        file_id = f"{base_name}_{file_stat.st_size if file_stat else 0}"
 
         for idx, page in enumerate(doc):
             page_num = idx + 1
@@ -113,22 +195,20 @@ class PDFDocumentReader:
             is_ocr = False
             confidence = 1.0
 
-            # If text layer is missing or extremely sparse on a scanned document, attempt OCR fallback
-            if len(raw_text.strip()) < 25:
+            # If text layer is missing or sparse (<30 chars) and page has images or drawings, run OCR
+            if len(raw_text.strip()) < 30 and (len(page.get_images()) > 0 or len(page.get_drawings()) > 0):
+                cache_key = f"{file_id}_p{page_num}"
+                try:
+                    pix = page.get_pixmap(dpi=150)
+                    ocr_result = _ocr_pixmap(pix, cache_key=cache_key)
+                    if len(ocr_result.strip()) > len(raw_text.strip()):
+                        raw_text = ocr_result
+                        is_ocr = True
+                        confidence = 0.85
+                except Exception:
+                    confidence = 0.5
+            elif len(raw_text.strip()) < 25:
                 confidence = 0.5
-                if is_scanned_doc and OCR_AVAILABLE:
-                    try:
-                        pix = page.get_pixmap(dpi=150)
-                        img = Image.open(io.BytesIO(pix.tobytes()))
-                        ocr_text = pytesseract.image_to_string(img)
-                        if len(ocr_text.strip()) > len(raw_text.strip()):
-                            raw_text = ocr_text
-                            is_ocr = True
-                            confidence = 0.6  # Scanned OCR page marked with lower confidence
-                    except Exception:
-                        pass
-                else:
-                    confidence = 0.5 if not is_scanned_doc else 0.3
 
             # Extract structured text blocks with font styles and coordinates
             text_page = page.get_text("dict")
@@ -171,12 +251,15 @@ class PDFDocumentReader:
                 })
 
             # Reconstruct horizontal lines across multi-column tables
-            words_sorted = sorted(words_raw, key=lambda w: (round(w[1] / 6) * 6, w[0]))
-            horizontal_lines = [
-                " ".join(w[4] for w in g).strip()
-                for _, g in groupby(words_sorted, key=lambda w: round(w[1] / 6) * 6)
-                if g
-            ]
+            if is_ocr:
+                horizontal_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+            else:
+                words_sorted = sorted(words_raw, key=lambda w: (round(w[1] / 6) * 6, w[0]))
+                horizontal_lines = [
+                    " ".join(w[4] for w in g).strip()
+                    for _, g in groupby(words_sorted, key=lambda w: round(w[1] / 6) * 6)
+                    if g
+                ]
 
             tables_data = []
 

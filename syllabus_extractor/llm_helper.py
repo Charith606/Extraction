@@ -3,7 +3,29 @@ import re
 import json
 import hashlib
 from typing import List, Dict, Tuple, Optional, Any
+from pydantic import BaseModel, model_validator
 from .llm_engine import LLMEngine
+from .config import config
+
+
+class SectionRange(BaseModel):
+    start: int
+    end: int
+
+    @model_validator(mode="after")
+    def validate_bounds(self):
+        if self.start < 0 or self.end < 0:
+            raise ValueError("Line numbers cannot be negative")
+        if self.start > self.end:
+            raise ValueError(f"start ({self.start}) must be <= end ({self.end})")
+        return self
+
+
+class SyllabusBoundaryOutput(BaseModel):
+    units: Optional[SectionRange] = None
+    course_outcomes: Optional[SectionRange] = None
+    co_po_matrix: Optional[SectionRange] = None
+    books: Optional[SectionRange] = None
 
 
 class LLMLineRangeBoundaryHelper:
@@ -11,12 +33,19 @@ class LLMLineRangeBoundaryHelper:
     Identifies variable section boundaries (Course Outcomes, CO-PO Matrix, Books, Units)
     by returning line ranges rather than generated text, guaranteeing strict grounding.
     
-    Uses LLMEngine (Gemini, OpenAI, Anthropic, Groq, Ollama) with SHA-256 persistent disk caching
-    for determinism, falling back to rule-based heuristics if no LLM credentials are provided.
+    Uses LLMEngine with strict Pydantic schema validation and Primary -> Backup escalation,
+    falling back to rule-based heuristics if no LLM credentials or valid outputs exist.
     """
 
     def __init__(self, llm_engine: Optional[LLMEngine] = None):
         self.llm = llm_engine or LLMEngine()
+        # Initialize backup engine if escalation is enabled
+        self.backup_llm = None
+        if config.enable_escalation and config.backup_provider not in ["heuristic", self.llm.provider]:
+            try:
+                self.backup_llm = LLMEngine(provider=config.backup_provider)
+            except Exception:
+                self.backup_llm = None
 
     def identify_section_ranges(self, lines: List[str]) -> Dict[str, Optional[Tuple[int, int]]]:
         """
@@ -26,44 +55,64 @@ class LLMLineRangeBoundaryHelper:
         if not lines:
             return {"metadata": None, "units": None, "course_outcomes": None, "co_po_matrix": None, "books": None}
 
-        # 1. Try LLM if provider is active
+        # 1. Try Primary LLM if active
         if self.llm.provider != "heuristic":
-            llm_ranges = self._query_llm_for_ranges(lines)
+            llm_ranges = self._query_llm_for_ranges(self.llm, lines)
             if llm_ranges:
                 return llm_ranges
 
-        # 2. Deterministic rule-based boundary fallback
+            # 2. Escalation Ladder: If primary fails, try backup model before heuristic
+            if self.backup_llm and self.backup_llm.provider != "heuristic":
+                backup_ranges = self._query_llm_for_ranges(self.backup_llm, lines)
+                if backup_ranges:
+                    return backup_ranges
+
+        # 3. Deterministic rule-based boundary fallback
         return self._compute_section_ranges_heuristic(lines)
 
-    def _query_llm_for_ranges(self, lines: List[str]) -> Optional[Dict[str, Optional[Tuple[int, int]]]]:
+    def _query_llm_for_ranges(self, engine: LLMEngine, lines: List[str]) -> Optional[Dict[str, Optional[Tuple[int, int]]]]:
         system_prompt = (
             "You are an expert document layout parser for university syllabus documents. "
             "Given numbered lines of a course syllabus, identify the 0-indexed line ranges [start_line, end_line] (inclusive) "
             "for these sections: 'units', 'course_outcomes', 'co_po_matrix', 'books'. "
-            "Return a JSON object with keys: 'units', 'course_outcomes', 'co_po_matrix', 'books'. "
-            "Each value must be an array of two integers [start, end] or null if that section is absent."
+            "Return a strictly valid JSON object with format:\n"
+            '{"units": {"start": 0, "end": 40}, "course_outcomes": {"start": 41, "end": 50}, "co_po_matrix": null, "books": {"start": 51, "end": 60}}\n'
+            "Or null for any section that is absent. Do not invent or overlap invalid lines."
         )
 
+        n = len(lines)
         numbered_lines = "\n".join(f"{i}: {line}" for i, line in enumerate(lines[:120]))
-        user_prompt = f"Identify the line index ranges for each section in this syllabus snippet:\n\n{numbered_lines}"
+        user_prompt = f"Identify the line index ranges for each section in this syllabus snippet (0 to {n-1}):\n\n{numbered_lines}"
 
         try:
-            raw_json_str = self.llm.generate(system_prompt, user_prompt, temperature=0.0)
+            raw_json_str = engine.generate(system_prompt, user_prompt, temperature=0.0)
             if not raw_json_str:
                 return None
 
-            data = json.loads(raw_json_str)
+            # Clean JSON formatting wrappers
+            clean_str = re.sub(r"^```(?:json)?\s*", "", raw_json_str.strip())
+            clean_str = re.sub(r"\s*```$", "", clean_str).strip()
+            data = json.loads(clean_str)
+
+            # Adapt both array format [start, end] and object format {"start": s, "end": e}
+            normalized_data = {}
+            for k in ["units", "course_outcomes", "co_po_matrix", "books"]:
+                val = data.get(k)
+                if isinstance(val, list) and len(val) == 2:
+                    normalized_data[k] = {"start": val[0], "end": val[1]}
+                elif isinstance(val, dict) and "start" in val and "end" in val:
+                    normalized_data[k] = val
+                else:
+                    normalized_data[k] = None
+
+            # Strict Pydantic validation
+            parsed_output = SyllabusBoundaryOutput.model_validate(normalized_data)
             ranges: Dict[str, Optional[Tuple[int, int]]] = {}
-            n = len(lines)
 
             for key in ["units", "course_outcomes", "co_po_matrix", "books"]:
-                val = data.get(key)
-                if isinstance(val, list) and len(val) == 2 and isinstance(val[0], int) and isinstance(val[1], int):
-                    s, e = val[0], val[1]
-                    if 0 <= s <= e < n:
-                        ranges[key] = (s, e)
-                    else:
-                        ranges[key] = None
+                range_obj = getattr(parsed_output, key)
+                if range_obj and 0 <= range_obj.start <= range_obj.end < n:
+                    ranges[key] = (range_obj.start, range_obj.end)
                 else:
                     ranges[key] = None
 

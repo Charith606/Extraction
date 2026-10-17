@@ -1,0 +1,26 @@
+{
+  "pdf_filename": "AVIT_SYLLABUS.pdf",
+  "sample_course_code": "17CSCC81",
+  "courses": [
+    "17CSCC81",
+    "17CSCC82"
+  ],
+  "units": [
+    "Unit 1: INTRODUCTION",
+    "Unit 2: KINEMATICS",
+    "Unit 3: DYNAMICS",
+    "Unit 4: ACTUATION",
+    "Unit 5: SENSING"
+  ],
+  "course_outcomes": [
+    "CO1",
+    "CO2",
+    "CO3",
+    "CO4",
+    "CO5"
+  ],
+  "books": [
+    "Introduction to Robotics by John J. Craig",
+    "Robotics and Control by R.K. Mittal"
+  ]
+}

@@ -1,7 +1,12 @@
+import os
+import json
+import hashlib
 import re
 from typing import List, Dict, Optional, Tuple, Set, Any
 from .reader import PDFDocumentReader, PDFPage
 from .models import CourseEntry, Task1Response
+
+_GLOBAL_TASK1_CACHE: Dict[str, Task1Response] = {}
 
 
 class CourseDiscoveryEngine:
@@ -100,10 +105,33 @@ class CourseDiscoveryEngine:
         self.filename = reader.filename
         self.pages = reader.pages
 
-    def run(self) -> Task1Response:
+    def run(self, use_cache: bool = True) -> Task1Response:
         """
-        Executes structural course discovery and segmentation.
+        Executes structural course discovery and segmentation with persistent caching.
         """
+        cache_key = None
+        pdf_path = getattr(self.reader, "pdf_path", None)
+        if use_cache and pdf_path and os.path.isfile(pdf_path):
+            try:
+                mtime = os.path.getmtime(pdf_path)
+                fsize = os.path.getsize(pdf_path)
+                cache_key = f"{os.path.abspath(pdf_path)}_{fsize}_{mtime}"
+                if cache_key in _GLOBAL_TASK1_CACHE:
+                    return _GLOBAL_TASK1_CACHE[cache_key]
+
+                cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                hash_id = hashlib.md5(f"{pdf_path}_{fsize}_{mtime}".encode("utf-8")).hexdigest()
+                disk_file = os.path.join(cache_dir, f"task1_{hash_id}.json")
+                if os.path.exists(disk_file):
+                    with open(disk_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    resp = Task1Response(**data)
+                    _GLOBAL_TASK1_CACHE[cache_key] = resp
+                    return resp
+            except Exception:
+                pass
+
         # Step 1: Discover all candidate course blocks
         raw_candidates = self._discover_all_candidate_courses()
 
@@ -161,29 +189,71 @@ class CourseDiscoveryEngine:
                     candidates_by_code[norm_code_base] = new_idx
                 candidates_by_title[norm_title] = new_idx
 
-        # Check if there are body-discovered courses in this document
-        has_body_courses = any(c.get("source") == "body" for c in final_candidates)
+        # Pre-evaluate candidates to determine whether this document contains actual detailed course syllabi
+        evaluated_candidates = []
+        has_body_syllabi = False
 
-        final_courses: List[CourseEntry] = []
         for cand in final_candidates:
             code = cand.get("code", "").strip()
             title = cand.get("title", "").strip()
-            start_page, score = self._find_detailed_syllabus_page_with_score(code, title, fallback_page=cand.get("fallback_page", 1))
+            fallback = cand.get("fallback_page", 1)
+            start_page, score = self._find_detailed_syllabus_page_with_score(code, title, fallback_page=fallback)
             
-            # If document contains detailed body courses, drop phantom table-only electives that have no syllabus
-            if has_body_courses and cand.get("source") == "table" and score <= 0:
-                continue
+            target_p = self.reader.get_page(start_page)
+            is_toc = target_p and (self._is_toc_or_scheme_page(target_p.raw_text) or self._is_cover_or_prelude_page(start_page, target_p.raw_text))
+            
+            if score > 0 and not is_toc:
+                has_body_syllabi = True
+
+            evaluated_candidates.append({
+                "code": code,
+                "title": title,
+                "fallback": fallback,
+                "start_page": start_page,
+                "score": score,
+                "is_toc": is_toc,
+                "source": cand.get("source", "body")
+            })
+
+        final_courses: List[CourseEntry] = []
+        for item in evaluated_candidates:
+            code = item["code"]
+            title = item["title"]
+            start_page = item["start_page"]
+            score = item["score"]
+            is_toc = item["is_toc"]
+
+            if has_body_syllabi:
+                # If document contains actual syllabi, exclude candidates that failed to match
+                # a detailed syllabus page or that point to TOC/curriculum table pages
+                if score <= 0 or is_toc:
+                    continue
+            else:
+                if score <= 0:
+                    start_page = item["fallback"]
 
             final_courses.append(CourseEntry(code=code, title=title, page=start_page))
 
         # Stably sort courses by page, then code, then title
         final_courses.sort(key=lambda x: (x.page, x.code, x.title))
 
-        return Task1Response(
+        resp = Task1Response(
             document=self.filename,
             course_count=len(final_courses),
             courses=final_courses
         )
+        if cache_key:
+            try:
+                _GLOBAL_TASK1_CACHE[cache_key] = resp
+                cache_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                hash_id = hashlib.md5(f"{pdf_path}_{fsize}_{mtime}".encode("utf-8")).hexdigest()
+                disk_file = os.path.join(cache_dir, f"task1_{hash_id}.json")
+                with open(disk_file, "w", encoding="utf-8") as f:
+                    json.dump(resp.model_dump(), f)
+            except Exception:
+                pass
+        return resp
 
     def _filter_running_headers(self, lines: List[str]) -> List[str]:
         """
@@ -238,9 +308,13 @@ class CourseDiscoveryEngine:
         c = code.upper().strip()
         if c.startswith(self.EXCLUDED_CODE_PREFIXES):
             return False
-        if "@" in code or ".com" in code.lower() or "/" in code:
+        if "@" in code or ".com" in code.lower() or "/" in code or ".pdf" in code.lower():
             return False
         if re.match(r"^[A-Z]+[-–—]?(19\d{2}|20\d{2})$", c):
+            return False
+        if re.match(r"^(?:CO|PO|PSO)\d*$", c):
+            return False
+        if re.match(r"^GS\d+$", c):
             return False
         has_digit = any(char.isdigit() for char in c)
         has_alpha = any(char.isalpha() for char in c)
@@ -250,11 +324,24 @@ class CourseDiscoveryEngine:
         text_lower = page_text.lower()
         has_toc_kw = any(k in text_lower for k in [
             "scheme of instruction", "curriculum & scheme", "curriculum and scheme",
-            "course structure", "table of contents", "list of courses", "list of subjects"
+            "course structure", "table of contents", "list of courses", "list of subjects",
+            "category credit detail", "credit requirement for course categories",
+            "details of elective courses", "foundation courses (fc)",
+            "foundation courses - hss, bs and es courses", "core courses relevant to the programme",
+            "details of open elective courses", "curriculum and scheme of instruction",
+            "category a", "category b", "category c", "category d",
+            "scheduling of courses", "schedulingofcourses"
         ])
+        distinct_codes = set()
+        for m in self.COURSE_CODE_REGEX.finditer(page_text):
+            c = re.sub(r"[^A-Z0-9]", "", m.group(1).upper())
+            if len(c) >= 4 and not c.startswith(self.EXCLUDED_CODE_PREFIXES):
+                distinct_codes.add(c)
+        has_many_codes = len(distinct_codes) >= 6
+
         has_units = any(re.search(u, text_lower) for u in self.ALL_UNIT_MARKERS)
         has_outcomes = any(re.search(o, text_lower) for o in self.OUTCOMES_MARKERS)
-        return has_toc_kw and not has_units and not has_outcomes
+        return (has_toc_kw or has_many_codes) and not has_units and not has_outcomes
 
     def _is_cover_or_prelude_page(self, page_num: int, page_text: str) -> bool:
         if page_num > 15:
@@ -289,6 +376,14 @@ class CourseDiscoveryEngine:
         if cleaned.endswith(".") or cleaned.endswith(",") or cleaned.endswith(";") or cleaned.endswith("&") or cleaned.endswith("+") or cleaned.endswith("-") or cleaned.startswith("&"):
             return False
         if any(cleaned == t or cleaned.startswith(t + " ") or cleaned.endswith(" " + t) for t in ["PROGRAMME", "BRANCH", "PROGRAMME & BRANCH", "PROGRAM & BRANCH", "PROGRAMME &", "PROGRAM &"]):
+            return False
+        if any(ext in title.lower() for ext in [".pdf", ".docx", ".doc", ".html", "http://", "https://"]):
+            return False
+        if re.match(r"^(?:ITEM\s*\d+|ANNEXURE|PROCEEDINGS|REPORT\s*ON\b)", cleaned):
+            return False
+        if re.search(r"\b(?:PSO\d|CO\d|PO\d)\b", cleaned) and not re.search(r"\b(?:ENGINEERING|SCIENCE|MATHEMATICS|PHYSICS|CHEMISTRY|SYSTEM|CIRCUIT|PROGRAMMING|STUDIES|MANAGEMENT|DESIGN|COMMUNICATION)\b", cleaned):
+            return False
+        if re.match(r"^(?:AND|OR)\s+", cleaned):
             return False
         if re.match(r"^[•\*\-–—:➢▶►✓\s]*(THIS COURSE|THE COURSE|STUDENTS WILL|AT THE END|AFTER COMPLETING|TO PROVIDE|TO INTRODUCE|TO ENABLE|TO DEVELOP|TO EQUIP|IN THIS|LEADING COMPANIES|THIS SUBJECT|THE OBJECTIVE|THE MAIN OBJECTIVE|THE AIM|AIM OF THE COURSE|COURSE DESCRIPTION|PREAMBLE|PREREQUISITES?|COURSE OBJECTIVES?|TO\s+[A-Z]+)\b", cleaned):
             return False
@@ -584,6 +679,23 @@ class CourseDiscoveryEngine:
         norm_base = re.sub(r"lab|laboratory|practicals?", "", norm_title)
         is_target_lab = "lab" in norm_title or "laboratory" in clean_title
 
+        # Construct OCR-tolerant pattern (e.g. BCHY101L -> BCHY[1Il|][0Oo][1Il|]L)
+        ocr_code_pattern = None
+        if code and len(code) >= 4:
+            pattern_parts = []
+            for char in code:
+                if char in "0Oo":
+                    pattern_parts.append(r"[0Oo]")
+                elif char in "1Il|":
+                    pattern_parts.append(r"[1Il|]")
+                elif char in "5Ss":
+                    pattern_parts.append(r"[5Ss]")
+                elif char in "8Bb":
+                    pattern_parts.append(r"[8Bb]")
+                else:
+                    pattern_parts.append(re.escape(char))
+            ocr_code_pattern = re.compile(rf"\b{''.join(pattern_parts)}\b", re.IGNORECASE)
+
         best_page = fallback_page
         best_score = -100
 
@@ -603,7 +715,7 @@ class CourseDiscoveryEngine:
             if top_lines and top_lines[0].strip().upper() in ["SYLLABUS", "INDEX"]:
                 continue
 
-            code_in_page = bool((code_pattern and code_pattern.search(text_lower)) or (code_base_pattern and code_base_pattern.search(text_lower)))
+            code_in_page = bool((code_pattern and code_pattern.search(text_lower)) or (code_base_pattern and code_base_pattern.search(text_lower)) or (ocr_code_pattern and ocr_code_pattern.search(text_lower)))
             title_in_page = bool(clean_title and (clean_title in text_lower or (len(norm_title) >= 4 and norm_title in norm_page_text)))
             base_in_page = bool(norm_base and len(norm_base) >= 5 and norm_base in norm_page_text and (is_target_lab == ("lab" in norm_page_text)))
 
@@ -615,7 +727,7 @@ class CourseDiscoveryEngine:
             if code:
                 if code_in_page:
                     score += 300
-                if (code_pattern and code_pattern.search(top_text)) or (code_base_pattern and code_base_pattern.search(top_text)):
+                if (code_pattern and code_pattern.search(top_text)) or (code_base_pattern and code_base_pattern.search(top_text)) or (ocr_code_pattern and ocr_code_pattern.search(top_text)):
                     score += 50
             else:
                 if code_in_page:

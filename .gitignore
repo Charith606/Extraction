@@ -13,9 +13,18 @@ env/
 venv/
 ENV/
 
-# Large uploaded syllabi (optional to exclude heavy binaries)
+# Large uploaded syllabi and reference books
 uploaded_syllabi/*.pdf
 !uploaded_syllabi/.gitkeep
+uploaded_reference_books/*.pdf
+!uploaded_reference_books/.gitkeep
+
+# Caches and scratch
+.cache/
+syllabus_extractor/.ocr_cache/
+scratch/
+*.tmp.pdf
 
 # Logs
 *.log
+
