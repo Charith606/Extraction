@@ -21,6 +21,10 @@ uploaded_reference_books/*.pdf
 
 # Caches and scratch
 .cache/
+cache/
+*.db
+*.sqlite
+*.sqlite3
 syllabus_extractor/.ocr_cache/
 scratch/
 *.tmp.pdf

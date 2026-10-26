@@ -61,6 +61,36 @@ def get_cached_reader(pdf_path: str) -> PDFDocumentReader:
     return reader
 
 
+def _bg_check_syllabus_books_online(pdf_path: str):
+    """
+    Background worker: scans the syllabus PDF for all reference books,
+    queries online availability (Google Books API, Internet Archive, Open Library)
+    in parallel, and populates the SQLite cache so that the user sees instantaneous
+    availability status and download links when viewing reference books.
+    """
+    try:
+        resolved = resolve_pdf_path(pdf_path)
+        if not resolved:
+            return
+        from reference_book_engine import extract_all_syllabus_books
+        from availability import check_book_availability
+        from cache import get_cached_book
+        from concurrent.futures import ThreadPoolExecutor
+
+        books = extract_all_syllabus_books(resolved)
+        citations_to_check = []
+        for b in books:
+            cit = b.get("full_citation") or f"{b.get('title', '')} {b.get('author', '')}".strip()
+            if cit and not get_cached_book(cit):
+                citations_to_check.append(cit)
+
+        if citations_to_check:
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                list(executor.map(lambda c: check_book_availability(c, use_cache=True), citations_to_check[:35]))
+    except Exception as e:
+        logger.warning(f"Background syllabus books check error: {e}")
+
+
 HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -196,6 +226,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span id="sidebarSavedBadge" class="sidebar-text text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 font-bold shrink-0">0</span>
       </button>
       
+      <!-- Syllabus All-Books Legal Access Hub Navigation Item -->
+      <button id="sidebarSyllabusBooksBtn" onclick="openCurrentSyllabusBooksHub()" title="Check all Reference Books in Syllabus" class="sidebar-nav-btn w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 hover:text-indigo-700 transition group text-left">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <span class="p-1.5 rounded-lg bg-purple-50 text-purple-600 group-hover:scale-110 transition shrink-0">📚</span>
+          <span class="sidebar-text truncate">Syllabus Books Hub</span>
+        </div>
+        <span id="sidebarSyllabusBooksBadge" class="sidebar-text text-[9px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 font-bold shrink-0">Extract First</span>
+      </button>
+
       <div class="sidebar-nav-btn w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 hover:text-indigo-700 transition group">
         <div class="flex items-center gap-2.5 min-w-0 cursor-pointer flex-1 py-0.5" onclick="navigateToReferenceBooks()" title="Navigate to Reference Books">
           <span class="p-1.5 rounded-lg bg-indigo-50 text-indigo-600 group-hover:scale-110 transition shrink-0">📖</span>
@@ -488,6 +527,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               <!-- High-Resolution Page Image -->
               <div id="pdfImgWrapper" class="relative transition-transform duration-150 origin-top flex items-center justify-center">
                 <img id="pdfPageImg" src="" alt="PDF Page" class="max-w-full rounded-xl shadow-2xl border border-slate-700 block transition cursor-pointer" onclick="handlePageImageClick(event)" title="Click left half for Prev Page, right half for Next Page">
+              </div>
+
+              <!-- Live Viewer Ready Placeholder (shown when no document is loaded) -->
+              <div id="pdfEmptyPlaceholder" class="flex flex-col items-center justify-center h-full text-center text-slate-400 space-y-3 my-auto py-24 select-none">
+                <div class="w-16 h-16 rounded-2xl bg-slate-800/90 border border-slate-700 flex items-center justify-center text-3xl shadow-inner">
+                  📄
+                </div>
+                <div>
+                  <h4 class="text-sm font-bold text-slate-200">Interactive Syllabus Page Viewer</h4>
+                  <p class="text-xs text-slate-400 mt-1 max-w-xs">Upload or select a syllabus PDF, or click any course to view its live syllabus page here.</p>
+                </div>
               </div>
 
               <!-- Native PDF Iframe (toggled when in Native PDF mode) -->
@@ -905,7 +955,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const books = await booksRes.json();
         renderSavedDocuments(docs);
         renderSavedRefBooks(books);
-        // Do NOT auto-select or auto-discover default PDF - user must select their own
+        if (allowAutoSelect && docs && docs.length > 0 && !currentViewerPdf) {
+          loadPdfInViewer(docs[0].path, 1, `📄 Active: ${docs[0].name}`);
+        }
       } catch (e) {
         console.error('Failed to load saved docs', e);
       }
@@ -976,6 +1028,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               </span>
               <span class="sidebar-text text-[10px] font-semibold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0 border border-slate-200/60">${doc.size_mb} MB</span>
             `;
+
             sideList.appendChild(item);
           });
         }
@@ -1503,7 +1556,18 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
     function renderTask1(data) {
       const container = document.getElementById('renderedView');
+      const sylBadge = document.getElementById('sidebarSyllabusBooksBadge');
+      if (sylBadge) {
+        sylBadge.innerText = '✓ Ready';
+        sylBadge.className = 'sidebar-text text-[9px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold shrink-0 animate-pulse';
+      }
+
       const courses = data.courses || [];
+      const sideSyllabusBadge = document.getElementById('sidebarSyllabusBooksBadge');
+      if (sideSyllabusBadge) {
+        sideSyllabusBadge.innerText = `${data.course_count || courses.length} Ready`;
+        sideSyllabusBadge.className = 'sidebar-text text-[9px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold shrink-0';
+      }
       container.innerHTML = `
         <div class="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
           <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 border-b border-slate-100 pb-3">
@@ -1511,9 +1575,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               <h3 class="text-lg font-bold text-slate-900">Task 1: Discovered Course Syllabi</h3>
               <p class="text-xs text-slate-500">Document: ${data.document} · Click any course card to inspect full Task 2 syllabus</p>
             </div>
-            <span class="px-3 py-1 rounded-full bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200">
-              ${data.course_count || courses.length} Courses Found
-            </span>
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="px-3 py-1 rounded-full bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200">
+                ${data.course_count || courses.length} Courses Discovered
+              </span>
+              <!-- Reference Books Hub Button: Appears automatically once extraction is complete! -->
+              <button type="button" onclick="openCurrentSyllabusBooksHub()" class="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold text-xs shadow-sm transition flex items-center gap-1.5 active:scale-95">
+                <span>📚 Check All Reference Books (Legal Access Hub)</span>
+              </button>
+            </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -2082,6 +2152,26 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                   </span>
                 </div>
 
+                <!-- Test Public Domain Free Download Demonstration Banner -->
+                <div class="p-3 bg-gradient-to-r from-emerald-50 via-teal-50 to-indigo-50 rounded-xl border border-emerald-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs shadow-2xs">
+                  <div>
+                    <div class="font-bold text-emerald-900 flex items-center gap-1.5">
+                      <span>✨</span> Test Legal Download (Public Domain Free Book):
+                    </div>
+                    <p class="text-[11px] text-slate-600 mt-0.5">Commercial textbooks (like Apress, McGraw-Hill) show <b>No Access</b> due to copyright. Click below to verify an automatic legal download!</p>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <button type="button" onclick="checkAndDownloadBook('Mansfield Merriman, Higher Mathematics', 'demo-math')" class="text-[11px] font-bold py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition active:scale-95 flex items-center gap-1">
+                      <span>📥 Test: Higher Mathematics</span>
+                    </button>
+                    <button type="button" onclick="checkAndDownloadBook('Mary Shelley, Frankenstein', 'demo-frank')" class="text-[11px] font-bold py-1.5 px-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition active:scale-95 flex items-center gap-1">
+                      <span>📥 Test: Frankenstein</span>
+                    </button>
+                  </div>
+                </div>
+                <div id="book-access-box-demo-math" class="p-2 empty:hidden"></div>
+                <div id="book-access-box-demo-frank" class="p-2 empty:hidden"></div>
+
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                   ${(textbooks || []).map((tb, idx) => `
                     <div onclick="selectBookForLocator('${escapeJs(tb)}', 'Textbook')" class="p-3.5 rounded-xl border border-blue-200 hover:border-blue-500 bg-white hover:bg-blue-50/30 transition cursor-pointer flex flex-col justify-between group shadow-xs">
@@ -2090,6 +2180,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">Textbook</span>
                         </div>
                         <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug group-hover:text-blue-700">${tb}</h5>
+                      </div>
+
+                      <!-- Legal Book Availability & Auto-Download Action Hub -->
+                      <div id="book-access-box-tb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100" onclick="event.stopPropagation()">
+                        <button type="button" onclick="checkAndDownloadBook('${escapeJs(tb)}', 'tb-${idx}')" class="w-full text-[11px] font-semibold py-1.5 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition flex items-center justify-center gap-1.5 shadow-2xs">
+                          <span>⬇️ Check & Download Free PDF</span>
+                        </button>
                       </div>
                       <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
                         <div class="flex items-center gap-2 text-slate-400">
@@ -2110,6 +2207,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-800">Reference Book</span>
                         </div>
                         <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug group-hover:text-purple-700">${rb}</h5>
+                      </div>
+
+                      <!-- Legal Book Availability & Auto-Download Action Hub -->
+                      <div id="book-access-box-rb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100" onclick="event.stopPropagation()">
+                        <button type="button" onclick="checkAndDownloadBook('${escapeJs(rb)}', 'rb-${idx}')" class="w-full text-[11px] font-semibold py-1.5 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition flex items-center justify-center gap-1.5 shadow-2xs">
+                          <span>⬇️ Check & Download Free PDF</span>
+                        </button>
                       </div>
                       <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
                         <div class="flex items-center gap-2 text-slate-400">
@@ -2202,6 +2306,424 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     let currentRefBookPath = null;
     let currentRefBookTopics = [];
     let currentActiveBook = null;
+
+    // -------------------------------------------------------------
+    // Legal Book Availability & Auto-Download Handler
+    // -------------------------------------------------------------
+    async function checkAndDownloadBook(citation, cardId, bypassCache = false) {
+      const container = document.getElementById(`book-access-box-${cardId}`);
+      if (!container) return;
+
+      container.innerHTML = `
+        <div class="flex items-center justify-center gap-2 text-[11px] text-amber-700 bg-amber-50 py-1.5 px-2.5 rounded-lg border border-amber-200 font-medium">
+          <svg class="animate-spin h-3.5 w-3.5 text-amber-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+          </svg>
+          <span>Checking legal archives...</span>
+        </div>
+      `;
+
+      try {
+        const resp = await fetch('/api/check-book', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ citation: citation, bypass_cache: bypassCache })
+        });
+
+        if (!resp.ok) {
+          throw new Error('Server returned HTTP ' + resp.status);
+        }
+
+        const data = await resp.json();
+
+        const cardEl = document.getElementById(`book-card-${cardId}`);
+        if (data.status === 'AVAILABLE') {
+          if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-blue-500 bg-blue-50/70 shadow-sm flex flex-col justify-between space-y-2.5 transition';
+          container.innerHTML = `
+            <div class="space-y-1.5 w-full">
+              <div class="flex items-center justify-between text-[11px]">
+                <span class="font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded flex items-center gap-1">
+                  ✓ Available (${data.source || 'Verified'})
+                </span>
+                <a href="${data.download_endpoint || '/api/download/' + data.book_id}" download class="font-bold text-emerald-700 hover:text-emerald-900 underline text-[10px]">
+                  ⬇️ Download Again
+                </a>
+              </div>
+            </div>
+          `;
+
+          // Automatic download to user's device
+          const dlLink = document.createElement('a');
+          dlLink.href = data.download_endpoint || ('/api/download/' + data.book_id);
+          dlLink.setAttribute('download', (data.parsed_title || 'book') + '.pdf');
+          document.body.appendChild(dlLink);
+          dlLink.click();
+          document.body.removeChild(dlLink);
+
+        } else {
+          if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-amber-400 bg-amber-50/80 shadow-2xs flex flex-col justify-between space-y-2.5 transition';
+          let previewHtml = '';
+          if (data.preview_url) {
+            previewHtml = `<a href="${data.preview_url}" target="_blank" class="text-[10px] text-blue-600 hover:underline">Read Preview/Borrow ↗</a>`;
+          }
+
+          container.innerHTML = `
+            <div class="flex items-center justify-between w-full gap-2">
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-200">
+                  ⛔ No Access
+                </span>
+                ${previewHtml}
+              </div>
+              <button type="button" onclick="checkAndDownloadBook('${escapeJs(citation)}', '${cardId}', true)" class="text-[10px] font-medium text-slate-500 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded border border-slate-200 transition">
+                🔄 Retry
+              </button>
+            </div>
+          `;
+        }
+      } catch (err) {
+        container.innerHTML = `
+          <div class="flex items-center justify-between w-full text-[10px] text-rose-600 bg-rose-50 px-2 py-1 rounded border border-rose-200">
+            <span>Check failed</span>
+            <button type="button" onclick="checkAndDownloadBook('${escapeJs(citation)}', '${cardId}', true)" class="text-[10px] font-bold text-rose-700 underline">
+              🔄 Retry
+            </button>
+          </div>
+        `;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Syllabus All-Books & Legal Access Explorer Handlers
+    // -------------------------------------------------------------
+    let currentSyllabusBooks = [];
+    let syllabusBooksSearchQuery = '';
+
+    function openCurrentSyllabusBooksHub() {
+      const activePath = localFilePath || (savedDocsList && savedDocsList[0] ? savedDocsList[0].path : null);
+      const activeName = (typeof currentDocLabel === 'string' && currentDocLabel) ? currentDocLabel : (activePath ? os_basename(activePath) : (savedDocsList && savedDocsList[0] ? savedDocsList[0].name : "AVIT_SYLLABUS.pdf"));
+      if (!activePath) {
+        alert("Please select or upload a syllabus PDF first.");
+        return;
+      }
+      openSyllabusBooksHub(activePath, activeName);
+    }
+
+    async function openSyllabusBooksHub(pdfPath, docName) {
+      const container = document.getElementById('resultsContainer');
+      const renderedView = document.getElementById('renderedView');
+      if (container) container.classList.remove('hidden');
+
+      // 1. Immediately load the active syllabus into Image View on the right!
+      if (pdfPath) {
+        localFilePath = pdfPath;
+        currentDocLabel = docName || os_basename(pdfPath);
+        const sel = document.getElementById('viewerDocSelect');
+        if (sel) sel.value = pdfPath;
+        loadPdfInViewer(pdfPath, 1, `📄 Active Syllabus: ${docName || os_basename(pdfPath)}`);
+      }
+
+      if (renderedView) {
+        renderedView.innerHTML = `
+          <div class="p-10 text-center space-y-4 bg-white rounded-2xl border-2 border-indigo-200 shadow-sm my-4">
+            <div class="w-14 h-14 mx-auto rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-3xl animate-bounce">
+              🌐
+            </div>
+            <div class="space-y-1.5">
+              <h3 class="text-base font-extrabold text-slate-800">Searching Online Availability Across Google Books & Digital Archives...</h3>
+              <p class="text-xs text-slate-500 max-w-md mx-auto">
+                Scanning every reference book in <strong>${escapeJs(docName)}</strong>, verifying legal free downloads with Google Books API and Internet Archive.
+              </p>
+              <div class="inline-flex items-center gap-3 pt-2 text-[11px] font-semibold">
+                <span class="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">🔵 Blue = Can Download</span>
+                <span class="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">🟡 Yellow = Can't Download (Copyright)</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      try {
+        const resp = await fetch('/api/syllabus-books?pdf=' + encodeURIComponent(pdfPath));
+        if (!resp.ok) throw new Error("Server returned HTTP " + resp.status);
+        const data = await resp.json();
+        currentSyllabusBooks = data.books || [];
+        renderSyllabusBooksHub(docName, pdfPath);
+      } catch (err) {
+        if (renderedView) {
+          renderedView.innerHTML = `
+            <div class="p-6 text-center space-y-3 bg-rose-50 rounded-2xl border border-rose-200 text-rose-700 my-4">
+              <div class="text-3xl">⚠️</div>
+              <h3 class="text-sm font-bold">Could not load syllabus books</h3>
+              <p class="text-xs">${escapeJs(err.message)}</p>
+              <button onclick="backToTask1()" class="px-3.5 py-1.5 bg-white text-rose-700 border border-rose-300 rounded-lg text-xs font-semibold shadow-xs">Back to Syllabus</button>
+            </div>
+          `;
+        }
+      }
+    }
+
+    function jumpToCoursePage(pageNum, code, title) {
+      if (pageNum) {
+        setPdfPage(pageNum, `📖 <strong>[${code || 'Course'}]:</strong> ${title || ''} — Page ${pageNum}`);
+      }
+    }
+
+    function renderSyllabusBooksHub(docName, pdfPath) {
+      const renderedView = document.getElementById('renderedView');
+      if (!renderedView) return;
+
+      const query = (syllabusBooksSearchQuery || '').toLowerCase().trim();
+      const filteredBooks = currentSyllabusBooks.filter(b => {
+        if (!query) return true;
+        const code = (b.course_code || '').toLowerCase();
+        const ctitle = (b.course_title || '').toLowerCase();
+        const btitle = (b.title || '').toLowerCase();
+        const author = (b.author || '').toLowerCase();
+        return code.includes(query) || ctitle.includes(query) || btitle.includes(query) || author.includes(query);
+      });
+
+      const coursesMap = {};
+      filteredBooks.forEach(b => {
+        const cKey = b.course_code ? `${b.course_code} - ${b.course_title || 'General'}` : 'Other References';
+        if (!coursesMap[cKey]) {
+          coursesMap[cKey] = {
+            code: b.course_code || '',
+            title: b.course_title || '',
+            page: b.page,
+            books: []
+          };
+        }
+        coursesMap[cKey].books.push(b);
+      });
+
+      const totalCourses = Object.keys(coursesMap).length;
+      const totalBooks = filteredBooks.length;
+      const availCount = filteredBooks.filter(b => b.status === 'AVAILABLE' || b.color === 'blue').length;
+      const noAccCount = filteredBooks.filter(b => b.status === 'NO_ACCESS' || b.color === 'yellow').length;
+
+      renderedView.innerHTML = `
+        <div class="space-y-5">
+          <!-- Hub Header Card -->
+          <div class="p-5 md:p-6 rounded-2xl border-2 border-indigo-200 bg-gradient-to-br from-indigo-50/80 via-white to-purple-50/60 shadow-sm space-y-4">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-indigo-100 pb-4">
+              <div class="flex items-center gap-3">
+                <button onclick="backToTask1()" title="Back to Courses" class="w-8 h-8 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 flex items-center justify-center font-bold text-xs shadow-2xs transition">
+                  ←
+                </button>
+                <div>
+                  <h3 class="text-base font-extrabold text-slate-900 flex items-center gap-2">
+                    <span>📚</span> All Reference Books & Legal Access Hub
+                  </h3>
+                  <p class="text-xs text-slate-500 mt-0.5">
+                    Extracted from <strong>${escapeJs(docName)}</strong> (${totalBooks} books across ${totalCourses} subjects)
+                  </p>
+                </div>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200 flex items-center gap-1">
+                  🔵 ${availCount} Can Download
+                </span>
+                <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
+                  🟡 ${noAccCount} Protected (Copyright)
+                </span>
+                ${availCount > 0 ? `
+                  <button type="button" onclick="autoDownloadAllAvailableBooks()" class="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-sm transition flex items-center gap-1.5 active:scale-95">
+                    <span>📥 Download All Available (${availCount})</span>
+                  </button>
+                ` : ''}
+                <button type="button" onclick="checkAllSyllabusBooksBatch()" class="px-3 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-bold text-xs shadow-2xs transition flex items-center gap-1.5 active:scale-95">
+                  <span>⚡ Re-Check All</span>
+                </button>
+                <button type="button" onclick="backToTask1()" class="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold text-xs transition">
+                  Back to Courses
+                </button>
+              </div>
+            </div>
+                  Back to Course View
+                </button>
+              </div>
+            </div>
+
+            <!-- Search and Filter Bar -->
+            <div class="flex flex-col sm:flex-row gap-3 items-center justify-between">
+              <div class="relative w-full sm:w-96">
+                <input type="text"
+                  id="syllabusBooksSearchInput"
+                  value="${escapeJs(syllabusBooksSearchQuery)}"
+                  placeholder="Filter by course (e.g. 17MECC02), subject name, or book title..."
+                  oninput="handleSyllabusBooksSearch(event, '${escapeJs(docName)}', '${escapeJs(pdfPath)}')"
+                  class="w-full pl-9 pr-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-500 bg-white"
+                />
+                <span class="absolute left-3 top-2.5 text-slate-400 text-xs">🔍</span>
+              </div>
+              <div id="batchCheckProgressBar" class="text-xs font-semibold text-indigo-700 hidden items-center gap-2">
+                <span class="animate-spin">⏳</span>
+                <span id="batchProgressText">Checking books...</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Courses with Books Listing -->
+          <div class="space-y-4">
+            ${totalCourses === 0 ? `
+              <div class="p-8 text-center bg-white rounded-2xl border border-slate-200 text-slate-400 text-xs italic">
+                No reference books matching "${escapeJs(syllabusBooksSearchQuery)}" found.
+              </div>
+            ` : Object.keys(coursesMap).map((cKey, cIdx) => {
+              const cData = coursesMap[cKey];
+              return `
+                <div class="bg-white rounded-2xl border border-slate-200/80 shadow-2xs overflow-hidden">
+                  <!-- Course Header -->
+                  <div onclick="jumpToCoursePage(${cData.page || 1}, '${escapeJs(cData.code)}', '${escapeJs(cData.title)}')" class="px-4 py-3 bg-slate-50/70 hover:bg-indigo-50/40 border-b border-slate-100 flex items-center justify-between gap-2 cursor-pointer transition group/course">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <span class="text-xs font-mono font-bold px-2 py-0.5 rounded bg-indigo-100 text-indigo-800 shrink-0 group-hover/course:bg-indigo-600 group-hover/course:text-white transition">
+                        ${cData.code || 'COURSE'}
+                      </span>
+                      <h4 class="text-xs font-bold text-slate-800 group-hover/course:text-indigo-700 transition truncate">${cData.title || cKey}</h4>
+                    </div>
+                    <span class="text-[11px] text-indigo-600 group-hover/course:underline shrink-0 font-medium flex items-center gap-1">
+                      ${cData.books.length} ${cData.books.length === 1 ? 'book' : 'books'}
+                      ${cData.page ? ` · 📄 Jump to p. ${cData.page} →` : ''}
+                    </span>
+                  </div>
+
+                  <!-- Books Grid inside Course -->
+                  <div class="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                    ${cData.books.map((b, bIdx) => {
+                      const bookCardId = `hub-${cIdx}-${bIdx}`;
+                      const citationText = b.full_citation || `${b.title} ${b.author || ''}`;
+                      const isRef = (b.kind === 'Reference Book');
+                      return `
+                        ${(() => {
+                          const isAvail = (b.status === 'AVAILABLE');
+                          const isNoAcc = (b.status === 'NO_ACCESS');
+                          
+                          // Color Coding Rule:
+                          // Blue = CAN DOWNLOAD
+                          // Yellow = CANNOT DOWNLOAD (Copyright Protected)
+                          let cardClasses = 'border-2 border-slate-200 bg-white';
+                          if (isAvail) {
+                            cardClasses = 'border-2 border-blue-500 bg-blue-50/70 shadow-sm';
+                          } else if (isNoAcc) {
+                            cardClasses = 'border-2 border-amber-400 bg-amber-50/80 shadow-2xs';
+                          }
+
+                          return `
+                            <div id="book-card-${bookCardId}" class="p-3.5 rounded-xl ${cardClasses} flex flex-col justify-between space-y-2.5 transition">
+                              <div>
+                                <div class="flex items-center justify-between gap-1.5">
+                                  <span class="text-[9px] font-bold px-2 py-0.5 rounded ${isRef ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}">
+                                    ${b.kind || 'Reference Book'}
+                                  </span>
+
+                                  <!-- Access Status Pill -->
+                                  ${isAvail ? `
+                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex items-center gap-1 shadow-2xs">
+                                      ✓ Can Download (${b.source === 'local_reference_book' ? 'Local Ref Book' : (b.source || 'Available')})
+                                    </span>
+                                  ` : isNoAcc ? `
+                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1">
+                                      ⚠️ Can't Download (Copyright)
+                                    </span>
+                                  ` : `
+                                    <span class="text-[9px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
+                                      Unchecked
+                                    </span>
+                                  `}
+                                </div>
+
+                                <h5 class="font-bold text-xs ${isAvail ? 'text-blue-950 font-extrabold' : 'text-slate-900'} mt-1.5 leading-snug">
+                                  ${b.title || citationText}
+                                </h5>
+                                ${b.author ? `<div class="text-[10px] text-slate-500 italic mt-0.5">${b.author}</div>` : ''}
+                              </div>
+
+                              <!-- Action Box -->
+                              <div id="book-access-box-${bookCardId}" class="pt-2 border-t ${isAvail ? 'border-blue-200' : isNoAcc ? 'border-amber-200' : 'border-slate-100'}">
+                                ${isAvail ? `
+                                  <a href="${b.download_url || ('/api/download/' + b.book_id)}" download class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+                                    <span>📥 Download Book PDF</span>
+                                  </a>
+                                ` : isNoAcc ? `
+                                  <div class="flex items-center justify-between gap-1 text-[11px]">
+                                    ${b.preview_url ? `
+                                      <a href="${b.preview_url}" target="_blank" class="text-blue-600 hover:text-blue-800 font-semibold underline text-[10px] flex items-center gap-1">
+                                        Read Preview/Borrow ↗
+                                      </a>
+                                    ` : '<span class="text-slate-400 text-[10px]">No link online</span>'}
+                                    <button type="button" onclick="checkAndDownloadBook('${escapeJs(citationText)}', '${bookCardId}', true)" class="text-[10px] font-medium text-slate-500 hover:text-indigo-600 px-2 py-0.5 rounded bg-white border border-slate-200 transition">
+                                      🔄 Re-Check
+                                    </button>
+                                  </div>
+                                ` : `
+                                  <button type="button" onclick="checkAndDownloadBook('${escapeJs(citationText)}', '${bookCardId}')" class="w-full text-[11px] font-semibold py-1.5 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition flex items-center justify-center gap-1.5 shadow-2xs">
+                                    <span>⬇️ Check & Download Free PDF</span>
+                                  </button>
+                                `}
+                              </div>
+                            </div>
+                          `;
+                        })()}
+                      `;
+                    }).join('')}
+                  </div>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function handleSyllabusBooksSearch(e, docName, pdfPath) {
+      syllabusBooksSearchQuery = e.target.value;
+      renderSyllabusBooksHub(docName, pdfPath);
+      const input = document.getElementById('syllabusBooksSearchInput');
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }
+
+    async function checkAllSyllabusBooksBatch() {
+      const pBar = document.getElementById('batchCheckProgressBar');
+      const pText = document.getElementById('batchProgressText');
+      if (pBar) pBar.classList.remove('hidden');
+
+      const buttons = document.querySelectorAll('[id^="book-access-box-hub-"] button');
+      let done = 0;
+      for (const btn of buttons) {
+        done++;
+        if (pText) pText.innerText = `Checking book ${done} of ${buttons.length}...`;
+        btn.click();
+        await new Promise(r => setTimeout(r, 600));
+      }
+
+      if (pText) pText.innerText = `Checked all ${buttons.length} books!`;
+      setTimeout(() => { if (pBar) pBar.classList.add('hidden'); }, 3000);
+    }
+
+    function autoDownloadAllAvailableBooks() {
+      const availBooks = (currentSyllabusBooks || []).filter(b => b.status === 'AVAILABLE' && b.book_id);
+      if (!availBooks || availBooks.length === 0) {
+        alert("No freely downloadable books available yet. Commercial textbooks are copyright protected.");
+        return;
+      }
+      let delay = 0;
+      availBooks.forEach(b => {
+        setTimeout(() => {
+          const dlLink = document.createElement('a');
+          dlLink.href = b.download_url && b.download_url.startsWith('/api/') ? b.download_url : `/api/download/${b.book_id}`;
+          dlLink.setAttribute('download', (b.title || 'textbook') + '.pdf');
+          document.body.appendChild(dlLink);
+          dlLink.click();
+          document.body.removeChild(dlLink);
+        }, delay);
+        delay += 700;
+      });
+    }
 
     function selectBookForLocator(citation, kind, author, title, page) {
       if (!document.getElementById('referenceLocatorSection')) {
@@ -3702,7 +4224,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     }
 
     function setPdfPage(pageNum, reason = '') {
-      if (!currentViewerPdf) return;
+      if (!currentViewerPdf) {
+        if (localFilePath) {
+          currentViewerPdf = localFilePath;
+        } else {
+          return;
+        }
+      }
       const maxP = (viewerTotalPages && viewerTotalPages > 1) ? viewerTotalPages : Math.max(1, parseInt(pageNum) || 1);
       const target = Math.max(1, Math.min(parseInt(pageNum) || 1, maxP));
       currentViewerPage = target;
@@ -3763,6 +4291,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       const img = document.getElementById('pdfPageImg');
       const iframe = document.getElementById('pdfNativeIframe');
 
+      const emptyPl = document.getElementById('pdfEmptyPlaceholder');
+      if (emptyPl) emptyPl.classList.add('hidden');
+      const imgWrp = document.getElementById('pdfImgWrapper');
+      if (imgWrp) imgWrp.classList.remove('hidden');
+
       if (viewerDisplayMode === 'image') {
         if (iframe) iframe.classList.add('hidden');
         if (img) {
@@ -3779,6 +4312,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             if (loader) {
               loader.classList.remove('opacity-100');
               loader.classList.add('opacity-0', 'pointer-events-none');
+            }
+            if (emptyPl) {
+              emptyPl.classList.remove('hidden');
+              emptyPl.innerHTML = `
+                <div class="p-4 text-center space-y-2">
+                  <div class="text-amber-400 text-3xl">📄</div>
+                  <div class="text-xs font-bold text-slate-200">Could not render page ${target}</div>
+                  <p class="text-[11px] text-slate-400">Try switching to Native PDF view or reloading.</p>
+                  <button onclick="setViewerDisplayMode('native')" class="px-2.5 py-1 bg-blue-600 text-white rounded text-[11px] font-semibold">Switch to Native PDF</button>
+                </div>
+              `;
             }
           };
         }
@@ -3947,7 +4491,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         if (imgBtn) imgBtn.className = 'px-2 py-1 rounded-md text-slate-600 hover:text-slate-900 font-bold';
         if (nativeBtn) nativeBtn.className = 'px-2 py-1 rounded-md bg-white text-blue-700 shadow-xs font-bold';
       }
-      setPdfPage(currentViewerPage);
+      if (!currentViewerPdf && localFilePath) {
+        loadPdfInViewer(localFilePath, currentViewerPage || 1, 'Switched to ' + mode + ' view');
+      } else {
+        setPdfPage(currentViewerPage || 1);
+      }
     }
 
     function reloadViewerPage() {
@@ -4518,6 +5066,101 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
             self._send_html(HTML_TEMPLATE)
+        elif parsed.path == "/api/download-file":
+            params = urllib.parse.parse_qs(parsed.query)
+            file_param = params.get("file", [""])[0]
+            resolved = resolve_pdf_path(file_param)
+            if not resolved or not os.path.isfile(resolved):
+                self._send_json({"error": "File not found"}, 404)
+                return
+            try:
+                fname = os.path.basename(resolved)
+                file_size = os.path.getsize(resolved)
+                self.send_response(200)
+                self._send_cors_headers()
+                self.send_header("Content-Type", "application/pdf")
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                self.end_headers()
+                with open(resolved, "rb") as f:
+                    while True:
+                        chunk = f.read(65536)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                self.wfile.flush()
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+        elif parsed.path.startswith("/api/download/"):
+            book_id = parsed.path.split("/")[-1]
+            try:
+                from cache import get_cached_book_by_id
+                from downloader import validate_pdf_stream_header, sanitize_filename
+                import httpx
+
+                book_record = get_cached_book_by_id(book_id)
+                if not book_record or book_record.get("status") != "AVAILABLE":
+                    self._send_json({"error": "Book is not available for download or invalid ID"}, 404)
+                    return
+
+                download_url = book_record["download_url"]
+                filename = sanitize_filename(book_record.get("parsed_title") or "textbook")
+
+                # Handle local reference books directly from disk
+                if book_record.get("source") == "local_reference_book" or (download_url and download_url.startswith("/api/download-file")):
+                    p_query = urllib.parse.urlparse(download_url).query
+                    fname_cand = urllib.parse.parse_qs(p_query).get("file", [""])[0]
+                    resolved_cand = resolve_pdf_path(fname_cand)
+                    if not resolved_cand or not os.path.isfile(resolved_cand):
+                        self._send_json({"error": "Local reference book file not found"}, 404)
+                        return
+                    out_fname = filename if filename.lower().endswith(".pdf") else (filename + ".pdf")
+                    f_sz = os.path.getsize(resolved_cand)
+                    self.send_response(200)
+                    self._send_cors_headers()
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Length", str(f_sz))
+                    self.send_header("Content-Disposition", f'attachment; filename="{out_fname}"')
+                    self.end_headers()
+                    with open(resolved_cand, "rb") as f:
+                        while True:
+                            chk = f.read(65536)
+                            if not chk:
+                                break
+                            self.wfile.write(chk)
+                    self.wfile.flush()
+                    return
+
+                try:
+                    client = httpx.Client(timeout=25.0, follow_redirects=True)
+                    resp, first_chunk = validate_pdf_stream_header(client, download_url)
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    if "Content-Length" in resp.headers:
+                        self.send_header("Content-Length", resp.headers["Content-Length"])
+                    self._send_cors_headers()
+                    self.end_headers()
+
+                    self.wfile.write(first_chunk)
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        if chunk:
+                            self.wfile.write(chunk)
+                    resp.close()
+                    client.close()
+                    return
+                except Exception as stream_err:
+                    # Graceful browser redirect to download source (essential when remote host like Google Books requires browser cookies)
+                    self.send_response(302)
+                    self._send_cors_headers()
+                    self.send_header("Location", download_url)
+                    self.end_headers()
+                    return
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
         elif parsed.path == "/api/pdf-page-image":
             params = urllib.parse.parse_qs(parsed.query)
             pdf_param = params.get("pdf", [""])[0]
@@ -4644,6 +5287,85 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "PDF file not found"}, 404)
                 return
             books = extract_all_syllabus_books(resolved)
+            try:
+                from cache import get_cached_book
+                from book_parser import parse_reference_book, is_title_match
+                from availability import check_book_availability
+                from concurrent.futures import ThreadPoolExecutor
+
+                local_ref_dir = os.path.join(BASE_DIR, "uploaded_reference_books")
+                local_files = []
+                if os.path.isdir(local_ref_dir):
+                    local_files = [f for f in os.listdir(local_ref_dir) if f.lower().endswith(".pdf") and not f.startswith(".")]
+
+                uncached_indices = []
+                for idx, b in enumerate(books):
+                    cit = b.get("full_citation") or f"{b.get('title', '')} {b.get('author', '')}".strip()
+                    parsed_b = parse_reference_book(cit)
+                    if parsed_b.title and (len(b.get("title", "")) <= 3 or len(parsed_b.title) > len(b.get("title", ""))):
+                        b["title"] = parsed_b.title
+                    if parsed_b.author and (len(b.get("author", "")) <= 3 or len(parsed_b.author) > len(b.get("author", ""))):
+                        b["author"] = parsed_b.author
+                    b["_parsed_citation"] = cit
+
+                    # 1. Check SQLite cache first for instant response
+                    cached = get_cached_book(cit)
+                    if cached:
+                        b["status"] = cached["status"]
+                        b["source"] = cached.get("source")
+                        b["download_url"] = cached.get("download_url")
+                        b["preview_url"] = cached.get("preview_url")
+                        b["book_id"] = cached.get("book_id")
+                        b["color"] = "blue" if cached.get("status") == "AVAILABLE" else "yellow"
+                    else:
+                        uncached_indices.append(idx)
+
+                # 2. Check top uncached books synchronously (fast ~1.5s), and background any remainder!
+                MAX_SYNC_CHECKS = 10
+                to_check_now = uncached_indices[:MAX_SYNC_CHECKS]
+                remaining_indices = uncached_indices[MAX_SYNC_CHECKS:]
+
+                if to_check_now:
+                    def _query_online(idx_pos):
+                        c_text = books[idx_pos]["_parsed_citation"]
+                        return idx_pos, check_book_availability(c_text, use_cache=True)
+
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        checked_results = executor.map(_query_online, to_check_now)
+                        for idx_pos, res in checked_results:
+                            books[idx_pos]["status"] = res.status
+                            books[idx_pos]["source"] = res.source
+                            books[idx_pos]["download_url"] = res.download_url
+                            books[idx_pos]["preview_url"] = res.preview_url
+                            books[idx_pos]["book_id"] = res.book_id
+                            books[idx_pos]["color"] = "blue" if res.status == "AVAILABLE" else "yellow"
+                            books[idx_pos]["reason"] = res.reason
+
+                # For remaining books, assign safe default so the UI renders all courses & books instantly!
+                for idx_pos in remaining_indices:
+                    title_enc = urllib.parse.quote(books[idx_pos].get("title", ""))
+                    author_enc = urllib.parse.quote(books[idx_pos].get("author", ""))
+                    q_enc = f"{title_enc}+{author_enc}".strip("+")
+                    books[idx_pos]["status"] = "NO_ACCESS"
+                    books[idx_pos]["color"] = "yellow"
+                    books[idx_pos]["source"] = None
+                    books[idx_pos]["download_url"] = None
+                    books[idx_pos]["preview_url"] = f"https://www.google.com/search?tbm=bks&q={q_enc}"
+
+                # Background worker: asynchronously check remaining books and save into cache
+                if remaining_indices:
+                    rem_cits = [books[i]["_parsed_citation"] for i in remaining_indices]
+                    def _bg_worker(cits):
+                        with ThreadPoolExecutor(max_workers=4) as ex:
+                            list(ex.map(lambda c: check_book_availability(c, use_cache=True), cits))
+                    threading.Thread(target=_bg_worker, args=(rem_cits,), daemon=True).start()
+
+                # Clean temporary helper keys
+                for b in books:
+                    b.pop("_parsed_citation", None)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
             self._send_json({"books": books})
         elif parsed.path == "/api/reference-book/search":
             params = urllib.parse.parse_qs(parsed.query)
@@ -4823,7 +5545,33 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "Not found"}, 404)
 
     def do_POST(self):
-        if self.path == "/api/upload":
+        if self.path == "/api/check-book":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                post_body = self.rfile.read(content_len)
+                data = json.loads(post_body.decode("utf-8"))
+                citation = data.get("citation", "").strip()
+                bypass_cache = data.get("bypass_cache", False)
+
+                from availability import check_book_availability
+                result = check_book_availability(citation, use_cache=not bypass_cache)
+
+                self._send_json({
+                    "book_id": result.book_id,
+                    "status": result.status,
+                    "parsed_title": result.parsed_title,
+                    "parsed_author": result.parsed_author,
+                    "source": result.source,
+                    "download_url": result.download_url,
+                    "preview_url": result.preview_url,
+                    "download_endpoint": f"/api/download/{result.book_id}" if result.status == "AVAILABLE" else None,
+                    "file_size_bytes": result.file_size_bytes,
+                    "reason": result.reason
+                })
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+        elif self.path == "/api/upload":
             try:
                 content_len = int(self.headers.get("Content-Length", 0))
                 if content_len == 0:
@@ -4867,6 +5615,8 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                         output_data = resp.model_dump()
                         output_data["document"] = safe_name
                         output_data["saved_path"] = saved_pdf_path
+                        # Proactively search online availability for all syllabus reference books in background
+                        threading.Thread(target=_bg_check_syllabus_books_online, args=(saved_pdf_path,), daemon=True).start()
                     else:
                         task2_key = f"{saved_pdf_path}_{course_code.upper().strip()}"
                         if task2_key in TASK2_CACHE:

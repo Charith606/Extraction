@@ -774,8 +774,8 @@ def find_subtopic_in_book(
             elif q_words and q_words.issubset(parent_words):
                 score = max(score, 14.0)
 
-            # Sub-topics should always take precedence over broad chapter overview containers
-            if item.get("is_chapter_container", False) or "Overview" in item.get("title", ""):
+            # Sub-topics should take precedence over broad chapter overview containers unless query matches title directly
+            if (item.get("is_chapter_container", False) or "Overview" in item.get("title", "")) and clean_q_lower not in title_lower:
                 score *= 0.4
 
             # Tie-break on score by earlier printed page number
@@ -1051,9 +1051,32 @@ def _is_syllabus_noise(text: str) -> bool:
         "quality council", "deming philosophy", "faculty of", "associate professor",
         "assistant professor", "designation", "mail id", "hours lecture", "preamble:",
         "prerequisite:", "syllabus:", "total quality management concepts",
-        "s.no", "name of the faculty", "faculty name"
+        "s.no", "name of the faculty", "faculty name",
+        # Administrative council, boards, approvals, meeting minutes & proceedings
+        "academic council", "board of studies", "proceedings of", "proceeings of",
+        "recommended by", "approved by", "aooroved by", "mode of evaluation",
+        "mode of assessment", "continuous assessment", "written assignment",
+        "agenda item", "annexure", "total lecture hours", "lecture hours",
+        "oral examination", "fat", "cat / written", "item 6", "item 65", "item 63",
+        "item 66", "item 67", "non-graded core", "graded core"
     ]
     if any(k in low for k in bad_markers):
+        return True
+
+    # Dates / Meeting IDs / Document IDs like '65 Date 17-03-2022', 'No. 63 Date 23.09.2021', '03.07.2021'
+    if re.search(r"\b(?:no\.?\s*\d+\s+)?date\s*[:\-–]?\s*\d{1,2}[\.\-\/]\d{1,2}[\.\-\/]\d{2,4}\b", low):
+        return True
+    if re.match(r"^\d+\s+date\s+\d{1,2}[\.\-\/]\d{1,2}[\.\-\/]\d{2,4}", low):
+        return True
+    if re.match(r"^(?:no\.?\s*\d+|date\b|\d{1,2}[\.\-\/]\d{1,2}[\.\-\/]\d{2,4}$)", low):
+        return True
+    if re.match(r"^(?:item\s*\d+[\/\d]*|agenda\s*item)\b", low):
+        return True
+
+    # Citations that are just a year like '(2012)' or just Roman numerals / digits
+    if re.match(r"^\(?\s*(?:19|20)\d{2}\s*\)?$", low):
+        return True
+    if re.match(r"^[0-9\s\.\-–—\(\)\[\]\/]+$", low):
         return True
 
     # If it consists mostly of table formatting characters like 'M - - - - L'
@@ -1063,76 +1086,251 @@ def _is_syllabus_noise(text: str) -> bool:
     return False
 
 
+def _clean_book_title(title: str) -> str:
+    """Strips trailing publisher, edition, year, and punctuation noise from title."""
+    t = re.sub(
+        r',?\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw|Wiley|Brooks/Cole|Cengage|Prentice|Pearson|PHI|Oxford|Cambridge|Springer|Packt|John\s+Wiley|O[\'’]Reilly|BPB|Morgan\s+Kaufmann).*$',
+        '',
+        title,
+        flags=re.I
+    ).strip(' ,.-;')
+    t = re.sub(r',?\s*(?:19|20)\d{2}\.?\s*$', '', t).strip(' ,.-;')
+    t = re.sub(r'[\u201c\u201d"]', '', t).strip(' ,.-;')
+    return t
+
+
 def _parse_book_citation(raw: str) -> Tuple[str, str]:
     """Extracts author and title cleanly from a raw bibliographic citation."""
     raw = raw.strip()
-    raw = re.sub(r'^[0-9]+[\.\)]\s*', '', raw).strip()
-    raw = re.sub(r'^[0-9]+[\.\)]\s*', '', raw).strip()
-    raw = raw.replace('\u201c', '"').replace('\u201d', '"').replace('`', "'")
-    
-    # Clean trailing faculty / designer artifacts
-    raw = re.sub(r'\s*(?:S\.?\s*No\.?|Name of the Faculty|Faculty Name).*$', '', raw, flags=re.I).strip()
-    
+    raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
+    raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
+    raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("`", "'")
+    raw = re.sub(
+        r'\s*(?:S\.?\s*No\.?|Name of the Faculty|Faculty Name|Proceedings of the|Mode of Evaluation|'
+        r'Mode of Assessment|Recommended by|Approved by|Aooroved by|Board of Studies|Academic Council|'
+        r'Agenda Item|Annexure|No\.\s*\d+|Date\s*\d+).*$',
+        '',
+        raw,
+        flags=re.IGNORECASE
+    ).strip()
+
+    title_keywords = {
+        "microprocessor", "microprocessors", "microcontroller", "microcontrollers",
+        "peripheral", "peripherals", "circuit", "circuits", "device", "devices",
+        "computer", "computing", "electric", "electrical", "power", "signal",
+        "signals", "processing", "communication", "communications", "network",
+        "networks", "database", "databases", "operating", "digital", "analog",
+        "linear", "control", "learning", "vision", "robotics", "intelligence",
+        "structure", "structures", "algorithm", "algorithms", "language",
+        "programming", "architecture", "principles", "applications", "fundamentals",
+        "mechanics", "physics", "chemistry", "biology", "mathematics", "calculus",
+        "algebra", "geometry", "statistics", "statistical", "inference", "analytics",
+        "science", "theory", "engineering", "management", "english", "grammar",
+        "systems", "system", "introduction", "technology", "design", "handbook",
+        "guide", "data", "analysis", "modeling", "predictive", "multivariate",
+        "discrete", "graph", "environmental", "environment", "materials",
+        "strength", "advanced", "textbook", "elements", "effective", "expert",
+        "professional", "usage", "practical", "unix", "internals", "fuel", "cell", "cells",
+        "web", "internet", "html", "html5", "css", "css3", "javascript", "react", "reactjs",
+        "mastering", "mining", "deep", "reinforcement", "classification", "neural",
+        "exploratory", "inferential", "healthcare", "financial", "series", "time"
+    }
+
     # 1. Quoted title check: "Title"
-    q_match = re.search(r'"([^"]{3,120})"', raw)
+    q_match = re.search(r'["\u201c\u201d]([^"\u201c\u201d]{3,120})["\u201c\u201d]', raw)
     if q_match:
-        title = q_match.group(1).strip()
-        before = raw[:q_match.start()].strip(' ,-–:')
-        after = raw[q_match.end():].strip(' ,-–:')
-        if before and len(before) > 3 and not re.match(r'^(?:text\s*books?|references?)$', before, re.I):
+        title = _clean_book_title(q_match.group(1).strip())
+        before = raw[:q_match.start()].strip(" ,-–:")
+        after = raw[q_match.end():].strip(" ,-–:")
+        if before and len(before) > 3 and not re.match(r"^(?:text\s*books?|references?)$", before, re.I):
             author = before
         elif after:
-            parts = [p.strip() for p in after.split(',') if p.strip()]
+            parts = [p.strip() for p in after.split(",") if p.strip()]
             author = parts[0] if parts else "Unknown Author"
         else:
             author = "Unknown Author"
-        return author.strip(" ,.-"), title.strip(" ,.-")
+        return author.strip(" ,.-"), title
 
-    # 2. Check for Author. Title pattern (e.g. 'Pickett and Laster. Technical English: Writing...')
-    # Negative lookbehind (?<!\b[A-Z]) prevents splitting on initials like 'E.' in 'Deborah E. Bouchoux'
-    dot_m = re.match(r'^([A-Z][a-zA-Z\s&,]{3,40}(?<!\b[A-Z]))\.\s+([A-Z][^,]{4,80}(?:,\s*[^,]{4,60})?)(?:,\s*.*)?$', raw)
-    if dot_m and not any(p in dot_m.group(1).lower() for p in ['grammar', 'english for', 'practical', 'textbook']):
+    # 1b. Natural language 'Title by Author' check
+    by_m = re.search(r'^(.*?)\s+\bby\s+(.*)$', raw, flags=re.IGNORECASE)
+    if by_m:
+        t_cand = by_m.group(1).strip(" ,.-–:")
+        a_cand = by_m.group(2).strip(" ,.-–:")
+        if len(t_cand) >= 3 and len(a_cand) >= 3:
+            return a_cand.strip(" ,.-"), _clean_book_title(t_cand)
+
+    # 1c. Author An Introduction to / Fundamentals of / Principles of ...
+    intro_m = re.search(
+        r'^(.*?)\s+\b(An\s+Introduction\s+to\s+.*|Introduction\s+to\s+.*|Fundamentals\s+of\s+.*|Principles\s+of\s+.*)$',
+        raw,
+        flags=re.IGNORECASE
+    )
+    if intro_m:
+        a_c = intro_m.group(1).strip(" ,.-–:")
+        t_c = intro_m.group(2).strip(" ,.-–:")
+        if len(a_c) >= 3 and not any(k in a_c.lower() for k in ["textbook", "reference"]):
+            return a_c, _clean_book_title(t_c)
+
+    # 1d. Split by dot followed by capital letter e.g. Kuhn, Max, and Kjell Johnson. Applied Predictive Modeling...
+    dot_parts = re.split(r'\.\s+(?=[A-Z])', raw)
+    if len(dot_parts) >= 2:
+        for idx in range(1, len(dot_parts)):
+            dp = dot_parts[idx]
+            dp_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', dp.lower()))
+            if dp_words & title_keywords:
+                author_cand = '. '.join(dot_parts[:idx]).strip(' ,.-')
+                title_cand = dp.split(',')[0].strip(' ,.-')
+                if len(author_cand) >= 3 and len(title_cand) >= 3:
+                    return author_cand, _clean_book_title(title_cand)
+
+    # 2. Year pattern e.g. Author(s),? (Year),? Title, Publisher...
+    year_m = re.search(r'^(.*?)\s*,?\s*\(\s*((?:19|20)\d{2})\s*\)\s*[:,\-–]?\s*(.*)$', raw)
+    if year_m and len(year_m.group(3).strip(" ,.-–")) >= 3:
+        author_cand = year_m.group(1).strip(" ,.-–")
+        author_cand = re.sub(r'^(?:\[?\d+[\.\)\]\:]*|\u2022|\-)\s*', '', author_cand).strip()
+        rest_cand = year_m.group(3).strip(" ,.-–")
+        if author_cand and len(author_cand) >= 3 and not any(k in author_cand.lower() for k in ["textbook", "reference", "edition"]):
+            m_split = re.split(
+                r',\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw|Wiley|Brooks/Cole|Cengage|Prentice|Pearson|PHI|Oxford|Cambridge|Springer|New\s+Age)\b',
+                rest_cand,
+                flags=re.I
+            )
+            if len(m_split) > 1 and len(m_split[0].strip()) >= 3:
+                title_cand = m_split[0].strip(" ,.-")
+            else:
+                r_parts = [p.strip() for p in rest_cand.split(",") if p.strip()]
+                title_cand = r_parts[0].strip(" ,.-") if r_parts else rest_cand.strip(" ,.-")
+            return author_cand.strip(" ,.-"), _clean_book_title(title_cand)
+
+    # Clean out parenthesized years like (2012) or (2007)
+    cleaned = re.sub(r"\s*\(\s*(?:19|20)\d{2}\s*\)\s*", " ", raw)
+    cleaned = re.sub(r"\s*\b(?:19|20)\d{2}\.?\s*", " ", cleaned)
+    cleaned = re.sub(r"\s*\(\s*\)", " ", cleaned).strip(" ,.-;")
+
+    # 3. Colon handling
+    if ":" in cleaned:
+        colon_m = re.search(r"^(.*?)\s*:\s*(.*)$", cleaned)
+        if colon_m:
+            left = colon_m.group(1).strip()
+            right = colon_m.group(2).strip()
+            right_first = right.split(",")[0].strip()
+
+            # 3a. If right is just a volume number like ': 1' or ': Vol 2'
+            if re.match(r"^(?:vol\.?\s*)?\d+$", right_first, re.I):
+                left_parts = [p.strip() for p in left.split(",") if p.strip()]
+                if len(left_parts) >= 2:
+                    return left_parts[0].strip(" ,.-"), ", ".join(left_parts[1:]).strip(" ,.-")
+
+            # 3b. If left has author before comma, e.g. 'Robert C. Seacord, Effective C: An Introduction...'
+            if "," in left:
+                left_parts = [p.strip() for p in left.split(",") if p.strip()]
+                found_idx = None
+                for idx, lp in enumerate(left_parts):
+                    lp_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", lp.lower()))
+                    if lp_words & title_keywords:
+                        found_idx = idx
+                        break
+                if found_idx is not None and found_idx > 0:
+                    author_c = ", ".join(left_parts[:found_idx])
+                    title_c = ", ".join(left_parts[found_idx:]) + f": {right_first}"
+                    return author_c.strip(" ,.-"), _clean_book_title(title_c)
+                elif len(left_parts) >= 2:
+                    if "." in left_parts[1]:
+                        dot_sp = left_parts[1].split(".", 1)
+                        if any(w in dot_sp[1].lower() for w in title_keywords):
+                            author_c = f"{left_parts[0]}, {dot_sp[0]}".strip(" ,.-")
+                            title_c = f"{dot_sp[1].strip()}: {right_first}"
+                            return author_c, _clean_book_title(title_c)
+                    author_c = left_parts[0]
+                    title_c = f"{', '.join(left_parts[1:])}: {right_first}"
+                    return author_c.strip(" ,.-"), _clean_book_title(title_c)
+
+            # 3c. Author. Title: Subtitle (e.g. Pickett and Laster. Technical English: Writing...)
+            if "." in left and not re.search(r"\b(?:Dr|Mr|Mrs|Prof|[A-Z]\.[A-Z]?)\b", left):
+                dot_split = left.split(".", 1)
+                author_res = dot_split[0].strip(" ,.-")
+                title_res = f"{dot_split[1].strip(' ,.-')}: {right_first}"
+                return author_res.strip(" ,.-"), _clean_book_title(title_res)
+
+            # 3d. Author(s) : Title, Publisher (e.g. Martinez : Exploratory Data Analysis)
+            if not any(k in left.lower() for k in ["text book", "reference book", "publisher", "isbn", "url", "http"]):
+                return left.strip(" ,.-"), _clean_book_title(right_first)
+
+    # 4. Check for Author. Title pattern
+    dot_m = re.match(r"^([A-Z][a-zA-Z\s&,]{3,40}(?<!\b[A-Z]))\.\s+([A-Z][^,]{4,80}(?:,\s*[^,]{4,60})?)(?:,\s*.*)?$", cleaned)
+    if dot_m and not any(p in dot_m.group(1).lower() for p in ["grammar", "english for", "practical", "textbook"]):
         author = dot_m.group(1).strip()
         title = dot_m.group(2).strip()
-        if ',' in title and any(pub in title.lower() for pub in ['publisher', 'press', 'edition', 'wiley', 'mcgraw']):
-            title = title.split(',')[0].strip()
-        return author.strip(" ,.-"), title.strip(" ,.-")
+        if "," in title and any(pub in title.lower() for pub in ["publisher", "press", "edition", "wiley", "mcgraw"]):
+            title = title.split(",")[0].strip()
+        return author.strip(" ,.-"), _clean_book_title(title)
 
-    title_words = {
-        'management', 'engineering', 'mathematics', 'english', 'physics', 'grammar',
-        'systems', 'introduction', 'technology', 'design', 'calculus', 'science',
-        'ethics', 'communication', 'mechanics', 'thermodynamics', 'electronics',
-        'chemistry', 'materials', 'dynamics', 'handbook', 'guide', 'principles',
-        'fundamentals', 'programming', 'structures', 'algorithms', 'networks',
-        'microprocessors', 'intelligence', 'software', 'automata', 'compiler',
-        'intellectual property', 'economics', 'accounting'
-    }
+    # 4b. Hyphen between Title and Author
+    if (" - " in cleaned or " – " in cleaned or "- " in cleaned) and "," in cleaned:
+        first_segment = cleaned.split(",")[0].strip()
+        h_match = re.search(r'^(.*?)\s*[\-–]\s*(.*)$', first_segment)
+        if h_match:
+            left_h = h_match.group(1).strip()
+            right_h = h_match.group(2).strip()
+            if any(w in left_h.lower() for w in title_keywords):
+                return right_h.strip(" ,.-"), _clean_book_title(left_h)
 
-    # 3. Dash separator
-    if ' - ' in raw or ' – ' in raw:
-        sep = ' – ' if ' – ' in raw else ' - '
-        parts = [p.strip() for p in raw.split(sep) if p.strip()]
+    # 5. Dash separator
+    if " - " in cleaned or " – " in cleaned:
+        sep = " – " if " – " in cleaned else " - "
+        parts = [p.strip() for p in cleaned.split(sep) if p.strip()]
         if len(parts) >= 2:
             p0, p1 = parts[0], parts[1]
-            p0_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', p0.lower()))
-            p1_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', p1.lower()))
-            if (p0_words & title_words) and not (p1_words & title_words):
-                return p1.strip(" ,.-"), p0.strip(" ,.-")
-            return p0.strip(" ,.-"), p1.strip(" ,.-")
+            p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
+            p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
+            if (p0_words & title_keywords) and not (p1_words & title_keywords):
+                return p1.strip(" ,.-"), _clean_book_title(p0)
+            return p0.strip(" ,.-"), _clean_book_title(p1)
 
-    # 4. Comma separated
-    parts = [p.strip() for p in raw.split(',') if p.strip()]
+    # 6. Comma separated
+    parts = [p.strip() for p in cleaned.split(",") if p.strip() and p.strip() != "()"]
+
+    # 6a. Title-first check (e.g. 'Discrete Mathematics and its applications, Kenneth H. Rosen...')
     if len(parts) >= 2:
-        for idx, p in enumerate(parts):
-            p_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', p.lower()))
-            if p_words & title_words:
-                title = p
-                authors = [parts[i] for i in range(idx)]
-                author = ', '.join(authors) if authors else (parts[idx+1] if idx+1 < len(parts) else "Unknown Author")
-                return author.strip(" ,.-"), title.strip(" ,.-")
-        return parts[0].strip(" ,.-"), parts[1].strip(" ,.-")
+        p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", parts[0].lower()))
+        p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", parts[1].lower()))
+        if (p0_words & title_keywords) and not (p1_words & title_keywords):
+            title = parts[0]
+            author = parts[1]
+            return author.strip(" ,.-"), _clean_book_title(title)
 
-    return "Unknown Author", raw
+    # 6b. Author-first with title keyword search
+    found_idx = None
+    for idx, p in enumerate(parts):
+        p_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p.lower()))
+        if p_words & title_keywords:
+            found_idx = idx
+            break
+
+    if found_idx is not None and found_idx > 0:
+        author = ", ".join(parts[:found_idx]).strip(" ,.-")
+        title = parts[found_idx].strip(" ,.-")
+        extra_title = []
+        for extra in parts[found_idx+1:]:
+            if re.search(r'\b(?:publisher|press|edition|wiley|mcgraw|pearson|phi|springer|cengage|hall|oxford|cambridge|no starch|packt|bpb)\b', extra, re.I):
+                break
+            if len(extra_title) < 2 and not re.match(r'^\d+$', extra):
+                extra_title.append(extra)
+            else:
+                break
+        if extra_title:
+            title += ", " + ", ".join(extra_title)
+        return author, _clean_book_title(title)
+
+    if len(parts) >= 3 and (len(parts[1]) <= 3 or re.match(r"^[A-Z](\.[A-Z]\.?)?$", parts[1].strip())):
+        author = f"{parts[0]}, {parts[1]}"
+        title = parts[2]
+        return author.strip(" ,.-"), _clean_book_title(title)
+
+    if len(parts) >= 2:
+        return parts[0].strip(" ,.-"), _clean_book_title(parts[1].strip(" ,.-"))
+
+    return "Unknown Author", _clean_book_title(raw)
 
 
 def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = None) -> List[Dict[str, Any]]:
@@ -1175,10 +1373,16 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
         else:
             text = doc[p].get_text("text")
             lines = [l.strip() for l in text.splitlines() if l.strip()]
+            code = None
+            title = None
             for idx, l in enumerate(lines[:14]):
-                m = re.match(r'^(17[A-Z]{2,6}\d{2}[A-Z]?)\b', l)
-                if m:
-                    code = m.group(1)
+                m_inline = re.search(r'Course\s*Code\s*[:|\t]+\s*([A-Z]{3,5}\d{2,4}[A-Z]?)', l, re.I)
+                if m_inline:
+                    code = m_inline.group(1)
+                    break
+                m_avit = re.match(r'^(17[A-Z]{2,6}\d{2}[A-Z]?)\b', l)
+                if m_avit:
+                    code = m_avit.group(1)
                     tparts = []
                     for j in range(idx + 1, min(len(lines), idx + 5)):
                         nl = lines[j]
@@ -1186,25 +1390,61 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
                             break
                         tparts.append(nl)
                     raw_title = ' '.join(tparts).strip() or code
-                    clean_title = re.sub(r'^(?:Subject\s*Title\s*[:\-]?\s*)', '', raw_title, flags=re.I).strip()
-                    current_course = {"code": code, "title": clean_title}
+                    title = re.sub(r'^(?:Subject\s*Title\s*[:\-]?\s*)', '', raw_title, flags=re.I).strip()
                     break
+                m2 = re.match(r"^([A-Z]{3,5}\d{2,4}[A-Z]?)\s+([A-Za-z\s&,\-–]+?)(?:\s+\d+\s+\d+\s+\d+.*|\s*$)", l)
+                if m2 and len(m2.group(2).strip()) > 3 and not re.match(r"^(?:Course\s*Code|Item\s*\d+|Syllabus)\b", m2.group(2).strip(), re.I):
+                    code = m2.group(1).strip()
+                    title = m2.group(2).strip()
+                    break
+                m_s = re.match(r"^([A-Z]{3,5}\d{2,4}[A-Z]?)$", l)
+                if m_s and not re.match(r'^(?:NIL|THEORY|LAB|PRACTICAL|CORE|ELECTIVE|CREDIT)$', m_s.group(1), re.I):
+                    code = m_s.group(1)
+                    break
+
+            if code:
+                if not title:
+                    for idx, l in enumerate(lines[:15]):
+                        m_ct = re.search(r'Course\s*Title\s*[:|\t\-–]?\s*(.*)$', l, re.I)
+                        if m_ct:
+                            rest = m_ct.group(1).strip()
+                            if not rest or re.match(r'^(?:L\s*T\s*P\s*C?|\d+.*)$', rest, re.I):
+                                if idx + 1 < len(lines):
+                                    cand = lines[idx+1].strip()
+                                    cand = re.sub(r'\s+\d+\s+\d+\s+\d+.*$', '', cand).strip()
+                                    if len(cand) > 3 and not re.match(r'^(?:Pre-requisite|Course\s*Objectives?|L\s*T\s*P)\b', cand, re.I):
+                                        title = cand
+                                        break
+                            elif len(rest) > 3 and not re.match(r'^(?:L\s*T\s*P\s*C?|\d+.*)$', rest, re.I):
+                                cand = re.sub(r'\s+\d+\s+\d+\s+\d+.*$', '', rest).strip()
+                                if len(cand) > 3:
+                                    title = cand
+                                    break
+                if not title:
+                    for idx, l in enumerate(lines[:15]):
+                        if l == code and idx + 1 < len(lines):
+                            cand = lines[idx+1].strip()
+                            cand = re.sub(r'\s+\d+\s+\d+\s+\d+.*$', '', cand).strip()
+                            if len(cand) > 3 and not re.match(r'^(?:Pre-requisite|Course|Semester|Category|L\s*T\s*P|Credit|\d+)\b', cand, re.I):
+                                title = cand
+                                break
+                current_course = {"code": code, "title": title or current_course["title"]}
         page_courses[page_num] = dict(current_course)
 
     # Pass 2: Extract bibliographic citations
     raw_books = []
+    mode = None
+    cur_book = None
 
     for p in range(len(doc)):
         page_num = p + 1
         text = doc[p].get_text("text")
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-        mode = None
-        cur_book = None
         course_info = page_courses.get(page_num, {"code": "", "title": "General Curriculum"})
 
         for l in lines:
-            tb_m = re.match(r"^(?:TEXT\s*BOOKS?|TEXTBOOK\(S\)?|PRESCRIBED\s*BOOKS?)\s*[:\-–—]?(.*)$", l, re.IGNORECASE)
-            rb_m = re.match(r"^(?:REFERENCES?|REFERENCE\s*BOOKS?|OTHER\s*REFERENCES?)\s*[:\-–—]?(.*)$", l, re.IGNORECASE)
+            tb_m = re.match(r"^(?:TEXT\s*BOOKS?(?:\s*\(S\))?|TEXTBOOK(?:\(S\))?|PRESCRIBED\s*BOOKS?)\s*[:\-–—]?(.*)$", l, re.IGNORECASE)
+            rb_m = re.match(r"^(?:REFERENCES?|REFERENCE\s*BOOKS?(?:\s*\(S\))?|OTHER\s*REFERENCES?)\s*[:\-–—]?(.*)$", l, re.IGNORECASE)
 
             if tb_m:
                 if cur_book and cur_book.get("text"):
@@ -1226,14 +1466,12 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
                 continue
 
             # Hard boundary markers to immediately exit book parsing
-            if re.match(r"^(?:COURSE\s*DESIGNERS?|COURSE\s*OBJECTIVES?|COURSE\s*OUTCOMES?|MAPPING|SYLLABUS|UNIT\s+[I|V|X\d]|MODULE|PREAMBLE|CATEGORY|PREREQUISITE|CREDIT|TOTAL\s*HOURS|S\.No|Faculty\s*Name|Name\s*of\s*the\s*Faculty)\b", l, re.IGNORECASE):
-                if cur_book and cur_book.get("text"):
-                    raw_books.append(cur_book)
-                    cur_book = None
-                mode = None
-                continue
-
-            if _is_syllabus_noise(l):
+            if re.match(
+                r"^(?:COURSE\s*DESIGNERS?|COURSE\s*OBJECTIVES?|COURSE\s*OUTCOMES?|MAPPING|SYLLABUS|UNIT\s+[I|V|X\d]|MODULE\s*[:\d]|"
+                r"PREAMBLE|CATEGORY|PREREQUISITE|CREDIT|TOTAL\s*HOURS|S\.No|Faculty\s*Name|Name\s*of\s*the\s*Faculty|"
+                r"MODE\s*OF\s*(?:EVALUATION|ASSESSMENT)|RECOMMENDED\s*BY|APPROVED\s*BY|AOOROVED\s*BY|BOARD\s*OF\s*STUDIES)\b",
+                l, re.IGNORECASE
+            ):
                 if cur_book and cur_book.get("text"):
                     raw_books.append(cur_book)
                     cur_book = None
@@ -1241,14 +1479,18 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
                 continue
 
             if mode:
-                # 1. Standalone number line like '1. ', '2. ', '3. ', '[1]'
+                # Inter-page running headers/footers: skip without breaking mode
+                if re.match(r'^(?:Proceedings\s*of|Item\s*\d+|Agenda\s*Item|\d{1,4}$)', l, re.IGNORECASE):
+                    continue
+
+                # Standalone citation marker: '1', '2', '1.', '[1]', '-'
                 if re.match(r"^(?:\[?\d+[\.\)\]\:]*|\u2022|\-)$", l):
                     if cur_book and cur_book.get("text"):
                         raw_books.append(cur_book)
                     cur_book = {"kind": mode, "page": page_num, "text": "", "course": course_info}
                     continue
 
-                # 2. Numbered item like '1. English...', '2 Pickett...'
+                # Numbered item: '1. Title...', '2 Title...'
                 num_m = re.match(r"^(?:\[?\d+[\.\)\]\:]*|\u2022|\-)\s+(.+)$", l)
                 if num_m:
                     if cur_book and cur_book.get("text"):
@@ -1259,21 +1501,29 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
                         cur_book = {"kind": mode, "page": page_num, "text": item_text, "course": course_info}
                     else:
                         mode = None
-                elif cur_book:
-                    # Continuation of bibliographic citation line
-                    if len(l) < 130 and not re.match(r"^[A-Z\s]{4,}$", l) and not _is_syllabus_noise(l):
-                        if cur_book["text"]:
-                            cur_book["text"] += " " + l
-                        else:
-                            cur_book["text"] = l
-                    else:
-                        if cur_book.get("text"):
-                            raw_books.append(cur_book)
-                        cur_book = None
-                        mode = None
+                    continue
 
-        if cur_book and cur_book.get("text"):
-            raw_books.append(cur_book)
+                # Fatal noise that ends book section
+                if _is_syllabus_noise(l):
+                    if cur_book and cur_book.get("text"):
+                        raw_books.append(cur_book)
+                        cur_book = None
+                    mode = None
+                    continue
+
+                # Continuation or unnumbered item
+                if cur_book and cur_book.get("text"):
+                    ends_with_year = bool(re.search(r'(?:\(\s*(?:19|20)\d{2}\s*\)|(?:19|20)\d{2}\.?)\s*$', cur_book["text"]))
+                    if ends_with_year and "," in l and len(l) > 15:
+                        raw_books.append(cur_book)
+                        cur_book = {"kind": mode, "page": page_num, "text": l, "course": course_info}
+                    else:
+                        cur_book["text"] += " " + l
+                else:
+                    cur_book = {"kind": mode, "page": page_num, "text": l, "course": course_info}
+
+    if cur_book and cur_book.get("text"):
+        raw_books.append(cur_book)
 
     # Pass 3: De-glom multi-citations, parse author/title, and link to parent course
     cleaned_records = []
@@ -1283,16 +1533,33 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
     for b in raw_books:
         raw_text = b["text"]
         # Split multiple citations on a single line if present (e.g. 'Press. 4 Pickett and Laster...')
-        sub_items = re.split(r'(?<=[a-zA-Z\.\'\"])\s+(?=\d+[\.\)]?\s+[A-Z])', raw_text)
+        sub_items = re.split(r'(?<=[a-zA-Z\.\'\"])\s+(?=(?:[1-9]|1\d)[\.\)]\s+[A-Z])|(?<=[\.\;])\s+(?=[1-9]\s+[A-Z])', raw_text)
 
         for item in sub_items:
             raw = re.sub(r"\s+", " ", item).strip()
             raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
             raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
             raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("'", "'")
-            raw = re.sub(r'\s*(?:S\.?\s*No\.?|Name of the Faculty|Faculty Name).*$', '', raw, flags=re.I).strip()
+            raw = re.sub(
+                r'\s*(?:S\.?\s*No\.?|Name of the Faculty|Faculty Name|Mode of (?:assessment|evaluation)|'
+                r'Recommended by|Approved by|Aooroved by|Proceedings of|Board of Studies|Academic Council|'
+                r'Agenda Item|Annexure|No\.\s*\d+|Date\s*\d+).*$',
+                '',
+                raw,
+                flags=re.IGNORECASE
+            ).strip()
 
-            if len(raw) < 12 or len(raw) > 350 or _is_syllabus_noise(raw):
+            if len(raw) < 8 or len(raw) > 350 or _is_syllabus_noise(raw):
+                continue
+
+            # Hard filter against council proceedings, dates, and administrative items
+            if re.search(r'\b(?:academic\s*council|proceedings|board\s*of\s*studies|mode\s*of\s*(?:evaluation|assessment))\b', raw, re.I):
+                continue
+            if re.match(r'^\d+\s*Date\s*[\d\.\-]+', raw, re.I):
+                continue
+            if re.match(r'^(?:No\.\s*\d+|Date\b)', raw, re.I):
+                continue
+            if re.match(r'^\([^\)]*series\)', raw, re.I) or re.match(r'^(?:nd|rd|th|st)\s+edition', raw, re.I):
                 continue
 
             c_code = b["course"].get("code", "")
@@ -1319,6 +1586,7 @@ def extract_all_syllabus_books(pdf_path: str, courses: Optional[List[Any]] = Non
 
     doc.close()
     return cleaned_records
+
 
 # ==============================================================================
 # UNIFIED REFERENCE BOOK MULTI-TOPIC SEARCH
