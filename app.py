@@ -784,11 +784,118 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       }
     }
 
-    // Load saved documents, profile, and sidebar on startup
+    // Load saved documents, profile, and restore complete view & reference book session on startup
     window.addEventListener('DOMContentLoaded', () => {
       initAdjustableSidebar();
-      fetchSavedDocuments();
       initUserProfile();
+      restorePreviousSession();
+    });
+
+    // -------------------------------------------------------------
+    // Full Session Restoration & Browser History Handlers
+    // -------------------------------------------------------------
+    let savedDocsList = [];
+    let savedRefBooksList = [];
+
+    async function restorePreviousSession() {
+      try {
+        const [docsRes, booksRes] = await Promise.all([
+          fetch('/api/documents'),
+          fetch('/api/reference-books')
+        ]);
+        const docs = await docsRes.json();
+        const books = await booksRes.json();
+        savedDocsList = docs || [];
+        savedRefBooksList = books || [];
+        renderSavedDocuments(docs);
+        renderSavedRefBooks(books);
+
+        // 1. Pre-select and retain reference book from localStorage or use first available
+        let savedRefPath = localStorage.getItem('selected_ref_book_path');
+        if (books && books.length > 0) {
+          const match = books.find(b => b.path === savedRefPath);
+          currentRefBookPath = match ? match.path : books[0].path;
+          localStorage.setItem('selected_ref_book_path', currentRefBookPath);
+        }
+
+        // 2. Pre-select and retain syllabus PDF from localStorage or use first available
+        let savedSylPath = localStorage.getItem('selected_syllabus_path');
+        let activeDoc = null;
+        if (docs && docs.length > 0) {
+          activeDoc = docs.find(d => d.path === savedSylPath) || docs[0];
+          localFilePath = activeDoc.path;
+          currentDocLabel = activeDoc.name;
+          localStorage.setItem('selected_syllabus_path', localFilePath);
+
+          const fileBadge = document.getElementById('selectedFileName');
+          if (fileBadge) {
+            fileBadge.classList.remove('hidden');
+            fileBadge.innerText = `✓ Stored File Selected: ${activeDoc.name} (${activeDoc.size_mb} MB)`;
+          }
+
+          if (typeof loadPdfInViewer === 'function') {
+            loadPdfInViewer(activeDoc.path, 1, `📄 Active Syllabus: ${activeDoc.name}`);
+          }
+        }
+
+        // 3. Restore user's exact active view (Task 1, Task 2, Books Hub, or Locator)
+        const hash = window.location.hash || '';
+        const savedView = localStorage.getItem('active_app_view') || 'task1';
+
+        if (hash.startsWith('#books_hub') || savedView === 'books_hub') {
+          if (localFilePath) {
+            await openSyllabusBooksHub(localFilePath, currentDocLabel, false);
+          } else {
+            uploadAndExtract('', 'discover');
+          }
+        } else if (hash.startsWith('#task2') || savedView === 'task2') {
+          const savedCourseCode = localStorage.getItem('selected_course_code');
+          const savedCoursePage = localStorage.getItem('selected_course_page');
+          if (savedCourseCode) {
+            drilldownCourse(savedCourseCode, savedCoursePage ? parseInt(savedCoursePage) : null, false);
+          } else {
+            uploadAndExtract('', 'discover');
+          }
+        } else if (hash.startsWith('#locator') || savedView === 'locator') {
+          await openReferenceBookWorkspace(currentRefBookPath, null, false);
+        } else if (localFilePath) {
+          // Default to Task 1: auto-discover courses so user never sees a blank dropzone
+          uploadAndExtract('', 'discover');
+        }
+      } catch (err) {
+        console.error('Session restore error:', err);
+      }
+    }
+
+    // Handle browser Back / Forward navigation seamlessly without page reload or state loss
+    window.addEventListener('popstate', (event) => {
+      const state = event.state;
+      if (!state || !state.view) {
+        backToTask1(false);
+        return;
+      }
+
+      if (state.view === 'task1') {
+        backToTask1(false);
+      } else if (state.view === 'task2' && state.code) {
+        drilldownCourse(state.code, state.page || null, false);
+      } else if (state.view === 'books_hub') {
+        const path = state.pdfPath || localFilePath || localStorage.getItem('selected_syllabus_path');
+        const name = state.docName || currentDocLabel || 'Syllabus';
+        if (path) openSyllabusBooksHub(path, name, false);
+        else backToTask1(false);
+      } else if (state.view === 'locator') {
+        openReferenceBookWorkspace(state.path || currentRefBookPath, null, false);
+      } else {
+        backToTask1(false);
+      }
+    });
+
+    // Handle bfcache / back navigation
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) {
+        restorePreviousSession();
+      }
     });
 
     // -------------------------------------------------------------
@@ -899,7 +1006,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       }
     }
 
-    async function openReferenceBookWorkspace(selectedPath = null, selectedName = null) {
+    async function openReferenceBookWorkspace(selectedPath = null, selectedName = null, pushHistory = true) {
+      localStorage.setItem('active_app_view', 'locator');
+      if (pushHistory) {
+        history.pushState({ view: 'locator', path: selectedPath }, '', '#locator');
+      }
       const container = document.getElementById('resultsContainer');
       const renderedView = document.getElementById('renderedView');
       if (container) container.classList.remove('hidden');
@@ -914,26 +1025,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
       await loadRefBooks();
 
-      if (selectedPath) {
-        currentRefBookPath = selectedPath;
+      const targetPath = selectedPath || currentRefBookPath || localStorage.getItem('selected_ref_book_path');
+      if (targetPath) {
+        currentRefBookPath = targetPath;
+        localStorage.setItem('selected_ref_book_path', targetPath);
         const sel = document.getElementById('refBookSelect');
-        if (sel) sel.value = selectedPath;
+        if (sel) sel.value = targetPath;
         if (typeof onRefBookSelected === 'function') {
           onRefBookSelected();
         }
-      } else {
-        const sel = document.getElementById('refBookSelect');
-        if (sel && sel.value) {
-          currentRefBookPath = sel.value;
-          if (typeof onRefBookSelected === 'function') onRefBookSelected();
-        } else if (sel && sel.options.length > 1) {
-          sel.selectedIndex = 1;
-          currentRefBookPath = sel.value;
-          if (typeof onRefBookSelected === 'function') onRefBookSelected();
-        }
       }
-
-      fetchSavedDocuments();
 
       const el = document.getElementById('referenceLocatorSection');
       if (el) {
@@ -953,6 +1054,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         ]);
         const docs = await docsRes.json();
         const books = await booksRes.json();
+        savedDocsList = docs || [];
+        savedRefBooksList = books || [];
         renderSavedDocuments(docs);
         renderSavedRefBooks(books);
         if (allowAutoSelect && docs && docs.length > 0 && !currentViewerPdf) {
@@ -1070,6 +1173,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       localFilePath = doc.path;
       currentDocLabel = doc.name;
       localStorage.setItem('selected_syllabus_path', doc.path);
+      localStorage.setItem('active_app_view', 'task1');
+      history.pushState({ view: 'task1', path: doc.path }, '', '#task1');
       clearStatus();
 
       const fileInput = document.getElementById('pdfFileInput');
@@ -1279,6 +1384,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         
         if (data.courses) {
           lastDiscoveredData = data;
+          localStorage.setItem('active_app_view', 'task1');
+          try {
+            if (localFilePath) localStorage.setItem('cached_discovered_' + localFilePath, JSON.stringify(data));
+          } catch(e) {}
           renderTask1(data);
           const firstP = requestedPage || ((data.courses[0] && data.courses[0].page) || 1);
           if (localFilePath) {
@@ -1298,11 +1407,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             courseExtractionCache[altKey] = data;
           }
 
-          renderTask2(data);
+          localStorage.setItem('active_app_view', 'task2');
+          localStorage.setItem('selected_course_code', data.course.code || drilldownCode);
           let targetP = requestedPage;
           if (!targetP) {
             targetP = (data.course.pages && data.course.pages.length) ? data.course.pages[0] : (data.course.page || 1);
           }
+          if (targetP) {
+            localStorage.setItem('selected_course_page', targetP.toString());
+          }
+
+          renderTask2(data);
           if (localFilePath && targetP) {
             const normCurrent = (currentViewerPdf || '').replace(/\\/g, '/').toLowerCase();
             const normLocal = (localFilePath || '').replace(/\\/g, '/').toLowerCase();
@@ -1341,16 +1456,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           
           <!-- Top Header -->
           <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-indigo-100 pb-3.5">
-            <div>
-              <div class="flex items-center gap-2">
-                <span class="text-xl">📚</span>
-                <h3 class="font-extrabold text-base text-indigo-950 uppercase tracking-wide">
-                  Reference Book Details & Deep Page Locator
-                </h3>
+            <div class="flex items-center gap-3">
+              <button type="button" id="locatorBackBtn" onclick="returnFromLocator()" class="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 font-bold text-xs border border-slate-200 shadow-2xs transition flex items-center gap-1">
+                ← Return to Course / Syllabus
+              </button>
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xl">📚</span>
+                  <h3 class="font-extrabold text-base text-indigo-950 uppercase tracking-wide">
+                    Reference Book Details & Deep Page Locator
+                  </h3>
+                </div>
+                <p class="text-xs text-indigo-700 mt-0.5">
+                  Inspect complete textbook details and chapters directory, then pinpoint exact page numbers for any sub-topic.
+                </p>
               </div>
-              <p class="text-xs text-indigo-700 mt-0.5">
-                Inspect complete textbook details and chapters directory, then pinpoint exact page numbers for any sub-topic.
-              </p>
             </div>
             <span class="text-[11px] px-3 py-1 rounded-full bg-indigo-100 text-indigo-800 font-bold border border-indigo-200 shadow-xs flex items-center gap-1.5 shrink-0">
               <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Deep Page Locator Active
@@ -1376,9 +1496,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               </div>
               <div id="activeBookCitation" class="text-[11px] text-slate-400 italic mt-0.5 hidden"></div>
               <div id="activeBookLinks" class="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-indigo-600 font-semibold">
-                <a href="https://www.google.com/search?tbm=bks&q=Higher+Engineering+Mathematics+B.S.+Grewal" target="_blank" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
+                <a href="https://www.google.com/search?tbm=bks&q=Higher+Engineering+Mathematics+B.S.+Grewal" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
                 <span>·</span>
-                <a href="https://openlibrary.org/search?q=Higher+Engineering+Mathematics+B.S.+Grewal" target="_blank" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
+                <a href="https://openlibrary.org/search?q=Higher+Engineering+Mathematics+B.S.+Grewal" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
               </div>
             </div>
             <div id="activeBookStatus" class="shrink-0 text-xs">
@@ -1760,9 +1880,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       }
     }
 
-    function drilldownCourse(code, targetPage = null) {
+    function drilldownCourse(code, targetPage = null, pushHistory = true) {
       selectedCourseCode = (code || '').trim();
       selectedCoursePage = targetPage;
+      localStorage.setItem('active_app_view', 'task2');
+      localStorage.setItem('selected_course_code', selectedCourseCode);
+      if (targetPage) localStorage.setItem('selected_course_page', targetPage.toString());
+      if (pushHistory) {
+        history.pushState({ view: 'task2', code: selectedCourseCode, page: targetPage }, '', '#task2-' + encodeURIComponent(selectedCourseCode));
+      }
       if (targetPage && localFilePath) {
         setPdfPage(targetPage, `🎯 Directing to [${code}] · Page ${targetPage}`);
       }
@@ -2174,55 +2300,55 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                   ${(textbooks || []).map((tb, idx) => `
-                    <div onclick="selectBookForLocator('${escapeJs(tb)}', 'Textbook')" class="p-3.5 rounded-xl border border-blue-200 hover:border-blue-500 bg-white hover:bg-blue-50/30 transition cursor-pointer flex flex-col justify-between group shadow-xs">
+                    <div id="book-card-tb-${idx}" class="p-3.5 rounded-xl border border-blue-200 hover:border-blue-400 bg-white hover:bg-blue-50/20 transition flex flex-col justify-between group shadow-xs">
                       <div>
                         <div class="flex justify-between items-start gap-2">
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">Textbook</span>
                         </div>
-                        <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug group-hover:text-blue-700">${tb}</h5>
+                        <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug">${tb}</h5>
                       </div>
 
                       <!-- Legal Book Availability & Auto-Download Action Hub -->
-                      <div id="book-access-box-tb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100" onclick="event.stopPropagation()">
+                      <div id="book-access-box-tb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100">
                         <button type="button" onclick="checkAndDownloadBook('${escapeJs(tb)}', 'tb-${idx}')" class="w-full text-[11px] font-semibold py-1.5 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition flex items-center justify-center gap-1.5 shadow-2xs">
                           <span>⬇️ Check & Download Free PDF</span>
                         </button>
                       </div>
                       <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
                         <div class="flex items-center gap-2 text-slate-400">
-                          <a href="https://www.google.com/search?tbm=bks&q=${encodeURIComponent(tb)}" target="_blank" onclick="event.stopPropagation()" class="hover:text-blue-600 underline">🌐 Preview</a>
-                          <a href="https://openlibrary.org/search?q=${encodeURIComponent(tb)}" target="_blank" onclick="event.stopPropagation()" class="hover:text-indigo-600 underline">🏛️ Open Lib</a>
+                          <a href="https://www.google.com/search?tbm=bks&q=${encodeURIComponent(tb)}" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 underline">🌐 Preview</a>
+                          <a href="https://openlibrary.org/search?q=${encodeURIComponent(tb)}" target="_blank" rel="noopener noreferrer" class="hover:text-indigo-600 underline">🏛️ Open Lib</a>
                         </div>
-                        <span class="text-blue-600 font-bold group-hover:translate-x-0.5 transition flex items-center gap-1">
-                          👉 Select Book →
-                        </span>
+                        <button type="button" onclick="goToLocatorFromCourse('${escapeJs(tb)}', 'Textbook', '${escapeJs(c.code || '')}', ${c.pages && c.pages[0] ? c.pages[0] : 1}, '${escapeJs(c.title || '')}')" class="text-blue-600 hover:text-blue-800 font-bold hover:translate-x-0.5 transition flex items-center gap-1 cursor-pointer">
+                          👉 Locate in Ref Book →
+                        </button>
                       </div>
                     </div>
                   `).join('')}
 
                   ${(references || []).map((rb, idx) => `
-                    <div onclick="selectBookForLocator('${escapeJs(rb)}', 'Reference Book')" class="p-3.5 rounded-xl border border-purple-200 hover:border-purple-500 bg-white hover:bg-purple-50/30 transition cursor-pointer flex flex-col justify-between group shadow-xs">
+                    <div id="book-card-rb-${idx}" class="p-3.5 rounded-xl border border-purple-200 hover:border-purple-400 bg-white hover:bg-purple-50/20 transition flex flex-col justify-between group shadow-xs">
                       <div>
                         <div class="flex justify-between items-start gap-2">
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-800">Reference Book</span>
                         </div>
-                        <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug group-hover:text-purple-700">${rb}</h5>
+                        <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug">${rb}</h5>
                       </div>
 
                       <!-- Legal Book Availability & Auto-Download Action Hub -->
-                      <div id="book-access-box-rb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100" onclick="event.stopPropagation()">
+                      <div id="book-access-box-rb-${idx}" class="mt-2.5 pt-2 border-t border-slate-100">
                         <button type="button" onclick="checkAndDownloadBook('${escapeJs(rb)}', 'rb-${idx}')" class="w-full text-[11px] font-semibold py-1.5 px-2.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 transition flex items-center justify-center gap-1.5 shadow-2xs">
                           <span>⬇️ Check & Download Free PDF</span>
                         </button>
                       </div>
                       <div class="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">
                         <div class="flex items-center gap-2 text-slate-400">
-                          <a href="https://www.google.com/search?tbm=bks&q=${encodeURIComponent(rb)}" target="_blank" onclick="event.stopPropagation()" class="hover:text-blue-600 underline">🌐 Preview</a>
-                          <a href="https://openlibrary.org/search?q=${encodeURIComponent(rb)}" target="_blank" onclick="event.stopPropagation()" class="hover:text-indigo-600 underline">🏛️ Open Lib</a>
+                          <a href="https://www.google.com/search?tbm=bks&q=${encodeURIComponent(rb)}" target="_blank" rel="noopener noreferrer" class="hover:text-blue-600 underline">🌐 Preview</a>
+                          <a href="https://openlibrary.org/search?q=${encodeURIComponent(rb)}" target="_blank" rel="noopener noreferrer" class="hover:text-indigo-600 underline">🏛️ Open Lib</a>
                         </div>
-                        <span class="text-purple-600 font-bold group-hover:translate-x-0.5 transition flex items-center gap-1">
-                          👉 Select Book →
-                        </span>
+                        <button type="button" onclick="goToLocatorFromCourse('${escapeJs(rb)}', 'Reference Book', '${escapeJs(c.code || '')}', ${c.pages && c.pages[0] ? c.pages[0] : 1}, '${escapeJs(c.title || '')}')" class="text-purple-600 hover:text-purple-800 font-bold hover:translate-x-0.5 transition flex items-center gap-1 cursor-pointer">
+                          👉 Locate in Ref Book →
+                        </button>
                       </div>
                     </div>
                   `).join('')}
@@ -2249,13 +2375,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       `;
     }
 
-    function backToTask1() {
+    function backToTask1(pushHistory = true) {
       window.currentCourseTask2Data = null;
-      if (lastDiscoveredData) {
+      localStorage.setItem('active_app_view', 'task1');
+      if (pushHistory) {
+        history.pushState({ view: 'task1' }, '', '#task1');
+      }
+      if (lastDiscoveredData && lastDiscoveredData.courses && lastDiscoveredData.courses.length > 0) {
         renderTask1(lastDiscoveredData);
         if (selectedCourseCode || selectedCoursePage) {
           selectCourseCard(selectedCourseCode, selectedCoursePage, '', false);
         }
+      } else {
+        const cached = localFilePath ? localStorage.getItem('cached_discovered_' + localFilePath) : null;
+        if (cached) {
+          try {
+            lastDiscoveredData = JSON.parse(cached);
+            renderTask1(lastDiscoveredData);
+            return;
+          } catch (e) {}
+        }
+        uploadAndExtract('', 'discover');
       }
     }
 
@@ -2308,6 +2448,61 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     let currentActiveBook = null;
 
     // -------------------------------------------------------------
+    // Safe Download Trigger (Always Opens In New Tab, Never Hijacks App)
+    // -------------------------------------------------------------
+    function triggerSafeDownload(url, filename) {
+      if (!url) return;
+      const a = document.createElement('a');
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+      if (filename) a.setAttribute('download', filename);
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        if (a && a.parentNode) a.parentNode.removeChild(a);
+      }, 1000);
+    }
+
+    // -------------------------------------------------------------
+    // Course to Locator Navigation & Return Handlers
+    // -------------------------------------------------------------
+    window.locatorReturnCourse = null;
+
+    function goToLocatorFromCourse(citation, kind, courseCode, coursePage, courseTitle) {
+      window.locatorReturnCourse = {
+        code: courseCode || (window.currentCourseTask2Data?.course?.code || ''),
+        page: coursePage || (window.currentCourseTask2Data?.course?.page || 1),
+        title: courseTitle || (window.currentCourseTask2Data?.course?.title || '')
+      };
+      try {
+        localStorage.setItem('locator_return_course', JSON.stringify(window.locatorReturnCourse));
+      } catch (e) {}
+
+      openReferenceBookWorkspace(null, null, true).then(() => {
+        selectBookForLocator(citation, kind, '', '', coursePage);
+        const backBtn = document.getElementById('locatorBackBtn');
+        if (backBtn && courseCode) {
+          backBtn.innerHTML = `← Back to Course [${courseCode}]`;
+        }
+      });
+    }
+
+    function returnFromLocator() {
+      let ret = window.locatorReturnCourse;
+      if (!ret) {
+        try {
+          ret = JSON.parse(localStorage.getItem('locator_return_course') || 'null');
+        } catch (e) {}
+      }
+      if (ret && ret.code) {
+        drilldownCourse(ret.code, ret.page || 1);
+      } else {
+        backToTask1();
+      }
+    }
+
+    // -------------------------------------------------------------
     // Legal Book Availability & Auto-Download Handler
     // -------------------------------------------------------------
     async function checkAndDownloadBook(citation, cardId, bypassCache = false) {
@@ -2346,26 +2541,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 <span class="font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded flex items-center gap-1">
                   ✓ Available (${data.source || 'Verified'})
                 </span>
-                <a href="${data.download_endpoint || '/api/download/' + data.book_id}" download class="font-bold text-emerald-700 hover:text-emerald-900 underline text-[10px]">
+                <a href="${data.download_endpoint || '/api/download/' + data.book_id}" target="_blank" rel="noopener noreferrer" download class="font-bold text-emerald-700 hover:text-emerald-900 underline text-[10px]">
                   ⬇️ Download Again
                 </a>
               </div>
             </div>
           `;
 
-          // Automatic download to user's device
-          const dlLink = document.createElement('a');
-          dlLink.href = data.download_endpoint || ('/api/download/' + data.book_id);
-          dlLink.setAttribute('download', (data.parsed_title || 'book') + '.pdf');
-          document.body.appendChild(dlLink);
-          dlLink.click();
-          document.body.removeChild(dlLink);
+          // Automatic safe download to user's device (never hijacks current tab)
+          triggerSafeDownload(data.download_endpoint || ('/api/download/' + data.book_id), (data.parsed_title || 'book') + '.pdf');
 
         } else {
           if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-amber-400 bg-amber-50/80 shadow-2xs flex flex-col justify-between space-y-2.5 transition';
           let previewHtml = '';
           if (data.preview_url) {
-            previewHtml = `<a href="${data.preview_url}" target="_blank" class="text-[10px] text-blue-600 hover:underline">Read Preview/Borrow ↗</a>`;
+            previewHtml = `<a href="${data.preview_url}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-blue-600 hover:underline">Read Preview/Borrow ↗</a>`;
           }
 
           container.innerHTML = `
@@ -2410,7 +2600,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       openSyllabusBooksHub(activePath, activeName);
     }
 
-    async function openSyllabusBooksHub(pdfPath, docName) {
+    async function openSyllabusBooksHub(pdfPath, docName, pushHistory = true) {
+      localStorage.setItem('active_app_view', 'books_hub');
+      if (pushHistory) {
+        history.pushState({ view: 'books_hub', pdfPath, docName }, '', '#books_hub');
+      }
       const container = document.getElementById('resultsContainer');
       const renderedView = document.getElementById('renderedView');
       if (container) container.classList.remove('hidden');
@@ -2419,6 +2613,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       if (pdfPath) {
         localFilePath = pdfPath;
         currentDocLabel = docName || os_basename(pdfPath);
+        localStorage.setItem('selected_syllabus_path', pdfPath);
         const sel = document.getElementById('viewerDocSelect');
         if (sel) sel.value = pdfPath;
         loadPdfInViewer(pdfPath, 1, `📄 Active Syllabus: ${docName || os_basename(pdfPath)}`);
@@ -2541,10 +2736,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 </button>
               </div>
             </div>
-                  Back to Course View
-                </button>
-              </div>
-            </div>
 
             <!-- Search and Filter Bar -->
             <div class="flex flex-col sm:flex-row gap-3 items-center justify-between">
@@ -2643,13 +2834,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                               <!-- Action Box -->
                               <div id="book-access-box-${bookCardId}" class="pt-2 border-t ${isAvail ? 'border-blue-200' : isNoAcc ? 'border-amber-200' : 'border-slate-100'}">
                                 ${isAvail ? `
-                                  <a href="${b.download_url || ('/api/download/' + b.book_id)}" download class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+                                  <a href="${b.download_url || ('/api/download/' + b.book_id)}" target="_blank" rel="noopener noreferrer" download class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
                                     <span>📥 Download Book PDF</span>
                                   </a>
                                 ` : isNoAcc ? `
                                   <div class="flex items-center justify-between gap-1 text-[11px]">
                                     ${b.preview_url ? `
-                                      <a href="${b.preview_url}" target="_blank" class="text-blue-600 hover:text-blue-800 font-semibold underline text-[10px] flex items-center gap-1">
+                                      <a href="${b.preview_url}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:text-blue-800 font-semibold underline text-[10px] flex items-center gap-1">
                                         Read Preview/Borrow ↗
                                       </a>
                                     ` : '<span class="text-slate-400 text-[10px]">No link online</span>'}
@@ -2714,20 +2905,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       let delay = 0;
       availBooks.forEach(b => {
         setTimeout(() => {
-          const dlLink = document.createElement('a');
-          dlLink.href = b.download_url && b.download_url.startsWith('/api/') ? b.download_url : `/api/download/${b.book_id}`;
-          dlLink.setAttribute('download', (b.title || 'textbook') + '.pdf');
-          document.body.appendChild(dlLink);
-          dlLink.click();
-          document.body.removeChild(dlLink);
+          const downloadUrl = b.download_url && b.download_url.startsWith('/api/') ? b.download_url : `/api/download/${b.book_id}`;
+          triggerSafeDownload(downloadUrl, (b.title || 'textbook') + '.pdf');
         }, delay);
         delay += 700;
       });
     }
 
-    function selectBookForLocator(citation, kind, author, title, page) {
+    async function selectBookForLocator(citation, kind, author, title, page) {
       if (!document.getElementById('referenceLocatorSection')) {
-        backToTask1();
+        await openReferenceBookWorkspace(null, null, false);
       }
       const displayTitle = title || citation;
       const displayAuthor = author || '';
@@ -2762,9 +2949,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       if (linksEl) {
         const q = encodeURIComponent(displayTitle + (displayAuthor ? ' ' + displayAuthor : ''));
         linksEl.innerHTML = `
-          <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
+          <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
           <span>·</span>
-          <a href="https://openlibrary.org/search?q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
+          <a href="https://openlibrary.org/search?q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
           ${page ? `<span>·</span><span class="text-slate-500">Cited on Syllabus p. ${page}</span>` : ''}
         `;
       }
@@ -2786,6 +2973,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             onRefBookSelected();
             matched = true;
             break;
+          }
+        }
+
+        if (!matched && currentRefBookPath) {
+          sel.value = currentRefBookPath;
+          if (sel.value === currentRefBookPath) {
+            onRefBookSelected();
+            matched = true;
           }
         }
       }
@@ -2822,6 +3017,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       try {
         const res = await fetch('/api/reference-books');
         const books = await res.json();
+        savedRefBooksList = books || [];
         sel.innerHTML = '<option value="">-- Choose or upload a reference book PDF --</option>';
         books.forEach(b => {
           const opt = document.createElement('option');
@@ -2829,12 +3025,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           opt.textContent = `${b.name} (${b.size_mb} MB)`;
           sel.appendChild(opt);
         });
-        if (currentRefBookPath) {
-          sel.value = currentRefBookPath;
-          onRefBookSelected();
-        } else if (books.length > 0) {
+
+        const targetPath = currentRefBookPath || localStorage.getItem('selected_ref_book_path');
+        if (targetPath) {
+          sel.value = targetPath;
+          if (sel.selectedIndex >= 0 && sel.value === targetPath) {
+            currentRefBookPath = targetPath;
+            onRefBookSelected();
+            return;
+          }
+        }
+        if (books.length > 0) {
           sel.selectedIndex = 1;
           currentRefBookPath = sel.value;
+          localStorage.setItem('selected_ref_book_path', currentRefBookPath);
           onRefBookSelected();
         }
       } catch (e) {
@@ -2846,6 +3050,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       const sel = document.getElementById('refBookSelect');
       const path = sel ? sel.value : null;
       currentRefBookPath = path;
+      if (path) {
+        localStorage.setItem('selected_ref_book_path', path);
+      }
       const mapBtn = document.getElementById('mapSyllabusBtn');
       const searchBtn = document.getElementById('searchSubtopicBtn');
       const viewTocBtn = document.getElementById('viewTocBtn');
@@ -2892,9 +3099,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         if (linksEl) {
           const q = encodeURIComponent(displayTitle + (displayAuthor ? ' ' + displayAuthor : ''));
           linksEl.innerHTML = `
-            <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
+            <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
             <span>·</span>
-            <a href="https://openlibrary.org/search?q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
+            <a href="https://openlibrary.org/search?q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
           `;
         }
 
@@ -2954,9 +3161,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         if (linksEl) {
           const q = encodeURIComponent(title + (author ? ' ' + author : ''));
           linksEl.innerHTML = `
-            <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
+            <a href="https://www.google.com/search?tbm=bks&q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🌐</span> Google Books Preview</a>
             <span>·</span>
-            <a href="https://openlibrary.org/search?q=${q}" target="_blank" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
+            <a href="https://openlibrary.org/search?q=${q}" target="_blank" rel="noopener noreferrer" class="hover:underline flex items-center gap-1"><span>🏛️</span> Open Library</a>
           `;
         }
 
@@ -3966,7 +4173,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                   <span class="text-[11px] text-blue-600 block">Total Pages: ${data.data.total_pages || 'N/A'} · Topics Found: ${data.data.topics.length}</span>
                 </div>
                 <div class="flex items-center gap-2">
-                  <a href="${gbooksUrl}" target="_blank" class="px-2.5 py-1 text-xs font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg border border-blue-200">🌐 Google Books</a>
+                  <a href="${gbooksUrl}" target="_blank" rel="noopener noreferrer" class="px-2.5 py-1 text-xs font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg border border-blue-200">🌐 Google Books</a>
                   <button onclick="document.getElementById('refBookResultsContainer').classList.add('hidden')" class="text-xs text-slate-400 hover:text-slate-600 font-bold">✕ Close</button>
                 </div>
               </div>
@@ -4012,10 +4219,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               </div>
 
               <div class="flex flex-wrap gap-2 pt-1 text-xs">
-                <a href="${gbooksUrl}" target="_blank" class="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold transition flex items-center gap-1.5 shadow-xs">
+                <a href="${gbooksUrl}" target="_blank" rel="noopener noreferrer" class="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold transition flex items-center gap-1.5 shadow-xs">
                   <span>🌐</span> View Preview & TOC on Google Books ↗
                 </a>
-                <a href="${olUrl}" target="_blank" class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold transition border border-slate-200 flex items-center gap-1.5">
+                <a href="${olUrl}" target="_blank" rel="noopener noreferrer" class="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold transition border border-slate-200 flex items-center gap-1.5">
                   <span>🏛️</span> View on Open Library ↗
                 </a>
                 ${hasLocalChapters ? `
