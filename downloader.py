@@ -27,7 +27,7 @@ Validation Before Download:
 import re
 import httpx
 import logging
-from typing import Generator, Tuple, Optional
+from typing import Generator, Tuple, Optional, Any
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from config import settings
@@ -51,16 +51,16 @@ def sanitize_filename(title: str) -> str:
     return f"{safe_title[:80]}.pdf"
 
 
-def validate_pdf_stream_header(client: httpx.Client, download_url: str) -> Tuple[httpx.Response, bytes]:
+def validate_pdf_stream_header(client: httpx.Client, download_url: str, chunk_size: int = 65536) -> Tuple[httpx.Response, Any, bytes]:
     """
     Performs initial pre-flight streaming validation on the target download URL:
     1. Sends a GET request with stream=True so headers arrive without the body.
     2. Inspects Content-Type.
     3. Inspects Content-Length if provided by the remote server.
-    4. Reads ONLY the first chunk (1024 bytes) to inspect the %PDF magic byte header.
+    4. Reads the first chunk (chunk_size) to inspect the %PDF magic byte header.
 
     Returns:
-        (response_object, first_chunk_bytes)
+        (response_object, stream_iter, first_chunk_bytes)
     Raises:
         HTTPException(400 or 404) if validation fails.
     """
@@ -112,8 +112,8 @@ def validate_pdf_stream_header(client: httpx.Client, download_url: str) -> Tuple
                 )
 
         # 3. Magic-bytes check on initial chunk
-        # iter_bytes(1024) pulls just the first kilobyte from the network stream
-        stream_iter = resp.iter_bytes(chunk_size=1024)
+        # iter_bytes pulls chunks from the network stream without creating multiple streams
+        stream_iter = resp.iter_bytes(chunk_size=chunk_size)
         first_chunk = next(stream_iter, b"")
 
         # Every genuine PDF file begins with '%PDF' (hex: 25 50 44 46)
@@ -125,7 +125,7 @@ def validate_pdf_stream_header(client: httpx.Client, download_url: str) -> Tuple
                 detail="Verification failed: File does not contain standard PDF magic header (%PDF)."
             )
 
-        return resp, first_chunk
+        return resp, stream_iter, first_chunk
 
     except httpx.TimeoutException:
         logger.error(f"Timeout while attempting to stream from {download_url}")
@@ -137,21 +137,14 @@ def validate_pdf_stream_header(client: httpx.Client, download_url: str) -> Tuple
         raise HTTPException(status_code=500, detail=f"Failed to stream book: {str(exc)}")
 
 
-def stream_pdf_generator(resp: httpx.Response, first_chunk: bytes, chunk_size: int = 65536) -> Generator[bytes, None, None]:
+def stream_pdf_generator(resp: httpx.Response, stream_iter: Any, first_chunk: bytes) -> Generator[bytes, None, None]:
     """
     Python generator that streams the PDF bytes to the client in chunks.
-
-    Syntax explanation:
-    - 'yield first_chunk': Since we already read the first 1 KB during the magic-byte
-      validation, we must yield it first so the user receives the complete file without
-      missing its beginning!
-    - 'yield chunk': Produces successive 64 KB slices as they arrive over the wire.
-    - 'finally: resp.close()': Ensures the network socket is closed when the client
-      finishes downloading or cancels the download.
     """
     try:
-        yield first_chunk
-        for chunk in resp.iter_bytes(chunk_size=chunk_size):
+        if first_chunk:
+            yield first_chunk
+        for chunk in stream_iter:
             if chunk:
                 yield chunk
     finally:
@@ -186,7 +179,7 @@ def create_book_download_response(book_id: str) -> StreamingResponse:
     # Open an httpx Client to manage the connection
     # follow_redirects=True is vital because many archive mirrors redirect to regional CDNs!
     client = httpx.Client(timeout=30.0, follow_redirects=True)
-    resp, first_chunk = validate_pdf_stream_header(client, download_url)
+    resp, stream_iter, first_chunk = validate_pdf_stream_header(client, download_url)
 
     # Set up HTTP headers for clean browser download
     headers = {
@@ -199,7 +192,7 @@ def create_book_download_response(book_id: str) -> StreamingResponse:
         headers["Content-Length"] = resp.headers["Content-Length"]
 
     return StreamingResponse(
-        content=stream_pdf_generator(resp, first_chunk),
+        content=stream_pdf_generator(resp, stream_iter, first_chunk),
         media_type="application/pdf",
         headers=headers
     )

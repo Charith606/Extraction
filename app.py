@@ -2458,8 +2458,6 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       if (!url) return;
       const a = document.createElement('a');
       a.href = url;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer';
       if (filename) a.setAttribute('download', filename);
       document.body.appendChild(a);
       a.click();
@@ -2567,12 +2565,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             `;
           }
 
-          const dlUrl = data.download_endpoint || (data.download_url ? data.download_url : `/api/download/${data.book_id}`);
+          const dlUrl = `/api/download/${data.book_id}`;
           const safeTitle = (data.parsed_title || 'textbook').replace(/["'<>]/g, '').trim();
 
           container.innerHTML = `
             <div class="space-y-2 w-full pt-1">
-              <a href="${dlUrl}" target="_blank" rel="noopener noreferrer" download="${escapeJs(safeTitle)}.pdf" class="w-full text-[11px] font-bold py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+              <a href="${dlUrl}" download="${escapeJs(safeTitle)}.pdf" class="w-full text-[11px] font-bold py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
                 <span>📥 Download Book PDF</span>
               </a>
               <div class="flex items-center justify-between text-[10px] text-slate-500 px-1">
@@ -2904,7 +2902,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                               <!-- Action Box -->
                               <div id="book-access-box-${bookCardId}" class="pt-2 border-t ${isAvail ? 'border-blue-200' : isNoAcc ? 'border-amber-200' : 'border-slate-100'}">
                                 ${isAvail ? `
-                                  <a href="${b.download_url || ('/api/download/' + b.book_id)}" target="_blank" rel="noopener noreferrer" download class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+                                  <a href="/api/download/${b.book_id}" download="${escapeJs(b.title || 'textbook')}.pdf" class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
                                     <span>📥 Download Book PDF</span>
                                   </a>
                                 ` : isNoAcc ? `
@@ -5409,26 +5407,77 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
                     return
 
-                clean_dl_url = urllib.parse.quote(download_url, safe=":/%?=&-#~")
                 out_fname = filename if filename.lower().endswith(".pdf") else (filename + ".pdf")
+                local_dest_path = os.path.join(REF_DIR, out_fname)
+
+                # If already downloaded locally, serve directly from disk instantly
+                if os.path.isfile(local_dest_path):
+                    f_sz = os.path.getsize(local_dest_path)
+                    self.send_response(200)
+                    self._send_cors_headers()
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Length", str(f_sz))
+                    self.send_header("Content-Disposition", f'attachment; filename="{out_fname}"')
+                    self.end_headers()
+                    with open(local_dest_path, "rb") as f:
+                        while True:
+                            chk = f.read(65536)
+                            if not chk:
+                                break
+                            self.wfile.write(chk)
+                    self.wfile.flush()
+                    return
+
+                clean_dl_url = urllib.parse.quote(download_url, safe=":/%?=&-#~")
                 try:
-                    client = httpx.Client(timeout=25.0, follow_redirects=True)
-                    resp, first_chunk = validate_pdf_stream_header(client, clean_dl_url)
+                    client = httpx.Client(timeout=30.0, follow_redirects=True)
+                    resp, stream_iter, first_chunk = validate_pdf_stream_header(client, clean_dl_url)
 
                     self.send_response(200)
+                    self._send_cors_headers()
                     self.send_header("Content-Type", "application/pdf")
                     self.send_header("Content-Disposition", f'attachment; filename="{out_fname}"')
                     if "Content-Length" in resp.headers:
                         self.send_header("Content-Length", resp.headers["Content-Length"])
-                    self._send_cors_headers()
                     self.end_headers()
 
-                    self.wfile.write(first_chunk)
-                    for chunk in resp.iter_bytes(chunk_size=65536):
-                        if chunk:
-                            self.wfile.write(chunk)
-                    resp.close()
-                    client.close()
+                    # Stream to browser and simultaneously cache locally to REF_DIR
+                    local_f = None
+                    try:
+                        if not os.path.exists(local_dest_path):
+                            local_f = open(local_dest_path + ".part", "wb")
+                    except Exception:
+                        local_f = None
+
+                    try:
+                        if first_chunk:
+                            self.wfile.write(first_chunk)
+                            if local_f:
+                                local_f.write(first_chunk)
+                        for chunk in stream_iter:
+                            if chunk:
+                                self.wfile.write(chunk)
+                                if local_f:
+                                    local_f.write(chunk)
+                        self.wfile.flush()
+                        if local_f:
+                            local_f.close()
+                            local_f = None
+                            if os.path.exists(local_dest_path + ".part"):
+                                os.replace(local_dest_path + ".part", local_dest_path)
+                    finally:
+                        if local_f:
+                            try:
+                                local_f.close()
+                            except Exception:
+                                pass
+                            if os.path.exists(local_dest_path + ".part"):
+                                try:
+                                    os.remove(local_dest_path + ".part")
+                                except Exception:
+                                    pass
+                        resp.close()
+                        client.close()
                     return
                 except Exception as stream_err:
                     # Graceful browser redirect to download source (essential when remote host like Google Books requires browser cookies)
