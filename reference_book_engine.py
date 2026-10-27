@@ -1086,24 +1086,65 @@ def _is_syllabus_noise(text: str) -> bool:
     return False
 
 
+_PUBLISHER_REGEX = re.compile(
+    r'\b(?:Tata\s+McGraw|McGraw(?:\-Hill)?|Wiley(?:[\s\-]+Interscience)?|Brooks/Cole|Cengage|'
+    r'Prentice(?:\-Hall)?|Pearson|PHI(?:\s+Learning)?|Oxford(?:\s+University\s+Press)?|'
+    r'Cambridge(?:\s+University\s+Press)?|Springer|Packt|John\s+Wiley|O[\'\u2019]Reilly|BPB|'
+    r'Morgan\s+Kaufmann|Elsevier|Butterworth|Academic\s+Press|Scientific\s+Publishers|'
+    r'S\.\s*Chand|Khanna(?:\s+Publishers)?|Galcotia|Harper\s+(?:and|\&)\s+Row|Dhanpat(?:\s*rai)?|'
+    r'Productivity\s+Press|New\s+Age(?:\s+International)?|SCM\s+Publishers|Publishers|Publications|'
+    r'Press|Company|Ltd\.?|Pvt\.?|Inc\.?)\b',
+    re.I
+)
+
+_ROMAN_VOLUME_REGEX = re.compile(
+    r'^(?:[IVXLCDM]+(?:\s*,\s*[IVXLCDM]+)*|Vol(?:ume)?\.?\s*[0-9IVXLCDM]+|Part\s*[0-9IVXLCDM]+|\d+(?:st|nd|rd|th)?\s*Ed(?:ition)?)$',
+    re.I
+)
+
 def _clean_book_title(title: str) -> str:
     """Strips trailing publisher, edition, year, and punctuation noise from title."""
+    t = re.sub(r'^(?:\[?\d+[\.\)\]\s\-\:]+)+', '', title).strip()
     t = re.sub(
-        r',?\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw|Wiley|Brooks/Cole|Cengage|Prentice|Pearson|PHI|Oxford|Cambridge|Springer|Packt|John\s+Wiley|O[\'’]Reilly|BPB|Morgan\s+Kaufmann).*$',
+        r',?\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw(?:\-Hill)?|Wiley|Brooks/Cole|Cengage|Prentice(?:\-Hall)?|Pearson|PHI|Oxford|Cambridge|Springer|Packt|John\s+Wiley|O[\'\u2019]Reilly|BPB|Morgan\s+Kaufmann).*$',
         '',
-        title,
+        t,
         flags=re.I
     ).strip(' ,.-;')
     t = re.sub(r',?\s*(?:19|20)\d{2}\.?\s*$', '', t).strip(' ,.-;')
     t = re.sub(r'[\u201c\u201d"]', '', t).strip(' ,.-;')
-    return t
+    return t.strip(' ,.-;')
+
+
+def _clean_book_author(author: str) -> str:
+    """Strips trailing publisher, edition, year, and location noise from author candidate."""
+    a = re.sub(r'^(?:\[?\d+[\.\)\]\s\-\:]+)+', '', author).strip()
+    a = re.sub(r'\s*\(\s*(?:\d+(?:st|nd|rd|th)|[IVXLCDM]+)?\s*ed(?:ition)?\.?\s*\)', '', a, flags=re.I)
+    a = re.sub(r',?\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Edition\s*\d+).*$', '', a, flags=re.I)
+    # Strip trailing publisher/location from author string only if there is a preceding author name
+    stripped = re.sub(
+        r',?\s*(?:Elsevier|Butterworth|Tata\s+McGraw|McGraw(?:\-Hill)?|Wiley|Cengage|Prentice(?:\-Hall)?|Pearson|PHI|Oxford|Cambridge|Springer|Packt|Dhanpatrai|S\.\s*Chand|Khanna|Galcotia|New\s+Age|SCM|Harper(?:\s+(?:and|\&)\s+Row)?|Productivity\s+Press|Publishing|Publishers|Press|Company|Ltd\.?|Pvt\.?|New\s+Delhi|New\s+York|Salem).*$',
+        '',
+        a,
+        flags=re.I
+    ).strip(' ,.-;')
+    if len(stripped) >= 3:
+        a = stripped
+    # Strip trailing year
+    a = re.sub(r',?\s*(?:19|20)\d{2}\.?\s*$', '', a).strip(' ,.-;')
+    return a.strip(' ,.-;')
+
+
+def _is_roman_or_volume(text: str) -> bool:
+    t = text.strip(' ,.-–—')
+    return bool(_ROMAN_VOLUME_REGEX.match(t)) or t.lower() in {'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'}
 
 
 def _parse_book_citation(raw: str) -> Tuple[str, str]:
     """Extracts author and title cleanly from a raw bibliographic citation."""
     raw = raw.strip()
-    raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
-    raw = re.sub(r"^[0-9]+[\.\)]\s*", "", raw).strip()
+    # Strip any leading numbers e.g. "1.", "1. 1.", "[1]", "4 "
+    raw = re.sub(r'^(?:\[?\d+[\.\)\]\s\-\:]+)+', '', raw).strip()
     raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("`", "'")
     raw = re.sub(
         r'\s*(?:S\.?\s*No\.?|Name of the Faculty|Faculty Name|Proceedings of the|Mode of Evaluation|'
@@ -1112,7 +1153,7 @@ def _parse_book_citation(raw: str) -> Tuple[str, str]:
         '',
         raw,
         flags=re.IGNORECASE
-    ).strip()
+    ).strip(' ,.-;')
 
     title_keywords = {
         "microprocessor", "microprocessors", "microcontroller", "microcontrollers",
@@ -1130,205 +1171,192 @@ def _parse_book_citation(raw: str) -> Tuple[str, str]:
         "guide", "data", "analysis", "modeling", "predictive", "multivariate",
         "discrete", "graph", "environmental", "environment", "materials",
         "strength", "advanced", "textbook", "elements", "effective", "expert",
-        "professional", "usage", "practical", "unix", "internals", "fuel", "cell", "cells",
-        "web", "internet", "html", "html5", "css", "css3", "javascript", "react", "reactjs",
-        "mastering", "mining", "deep", "reinforcement", "classification", "neural",
-        "exploratory", "inferential", "healthcare", "financial", "series", "time"
+        "professional", "usage", "practical", "unix", "linux", "cookbook", "internals",
+        "fuel", "cell", "cells", "web", "internet", "html", "html5", "css", "css3",
+        "javascript", "react", "reactjs", "mastering", "mining", "deep", "reinforcement",
+        "classification", "neural", "exploratory", "inferential", "healthcare",
+        "financial", "series", "time", "production", "ethics", "manufacturing",
+        "maintenance", "industrial", "quality", "service", "operations", "solving",
+        "microbiology", "planning", "forest", "property", "welding", "metallurgy"
     }
 
-    # 1. Quoted title check: "Title"
-    q_match = re.search(r'["\u201c\u201d]([^"\u201c\u201d]{3,120})["\u201c\u201d]', raw)
+    # 0. Institutional & Lab Manual special handlers
+    if re.search(r'\bWIPO\b', raw):
+        return "World Intellectual Property Organization (WIPO)", _clean_book_title(raw)
+    if re.search(r'\b(?:lab|laboratory|testing)\s+manual\b', raw, re.I):
+        return "Department / Faculty Manual", _clean_book_title(raw)
+    if re.search(r'\bmanuals?\s+of\s+various\s+standards\b', raw, re.I):
+        return "Standards Organization", _clean_book_title(raw)
+
+    # 1. Quoted title check: "Title" (both closed and unclosed quotes)
+    q_match = re.search(r'^(.*?)\s*["\u201c\u201d]([^"\u201c\u201d]{3,120})(?:["\u201c\u201d]|\s*[\-–—]\s*(?:Tata\s+McGraw|McGraw|Wiley|Pearson|PHI|Oxford|Cambridge|Springer|New\s+Age)|$)', raw)
     if q_match:
-        title = _clean_book_title(q_match.group(1).strip())
-        before = raw[:q_match.start()].strip(" ,-–:")
-        after = raw[q_match.end():].strip(" ,-–:")
-        if before and len(before) > 3 and not re.match(r"^(?:text\s*books?|references?)$", before, re.I):
-            author = before
+        before = q_match.group(1).strip(" ,-–:.")
+        title_str = _clean_book_title(q_match.group(2).strip())
+        after = raw[q_match.end():].strip(" ,-–:.")
+        if before and len(before) >= 3 and not re.match(r'^(?:text\s*books?|references?|handbook)$', before, re.I):
+            # E.g. Feigenbaum.A.V. -> A.V. Feigenbaum
+            feig_m = re.match(r'^([A-Z][a-zA-Z]+)\.([A-Z](?:\.[A-Z])*)', before)
+            if feig_m:
+                author = f"{feig_m.group(2)}. {feig_m.group(1)}"
+            else:
+                author = before
+            return _clean_book_author(author), title_str
         elif after:
             parts = [p.strip() for p in after.split(",") if p.strip()]
-            author = parts[0] if parts else "Unknown Author"
-        else:
-            author = "Unknown Author"
-        return author.strip(" ,.-"), title
+            cand = parts[0] if parts else ""
+            if _PUBLISHER_REGEX.search(cand):
+                author = "Corporate / Academic Press"
+            else:
+                author = cand
+            return _clean_book_author(author), title_str
 
-    # 1b. Natural language 'Title by Author' check
+    # 2. Natural language 'Title by Author' check
     by_m = re.search(r'^(.*?)\s+\bby\s+(.*)$', raw, flags=re.IGNORECASE)
     if by_m:
         t_cand = by_m.group(1).strip(" ,.-–:")
         a_cand = by_m.group(2).strip(" ,.-–:")
         if len(t_cand) >= 3 and len(a_cand) >= 3:
-            return a_cand.strip(" ,.-"), _clean_book_title(t_cand)
+            return _clean_book_author(a_cand), _clean_book_title(t_cand)
 
-    # 1c. Author An Introduction to / Fundamentals of / Principles of ...
-    intro_m = re.search(
-        r'^(.*?)\s+\b(An\s+Introduction\s+to\s+.*|Introduction\s+to\s+.*|Fundamentals\s+of\s+.*|Principles\s+of\s+.*)$',
-        raw,
-        flags=re.IGNORECASE
-    )
-    if intro_m:
-        a_c = intro_m.group(1).strip(" ,.-–:")
-        t_c = intro_m.group(2).strip(" ,.-–:")
-        if len(a_c) >= 3 and not any(k in a_c.lower() for k in ["textbook", "reference"]):
-            return a_c, _clean_book_title(t_c)
-
-    # 1d. Split by dot followed by capital letter e.g. Kuhn, Max, and Kjell Johnson. Applied Predictive Modeling...
-    dot_parts = re.split(r'\.\s+(?=[A-Z])', raw)
-    if len(dot_parts) >= 2:
-        for idx in range(1, len(dot_parts)):
-            dp = dot_parts[idx]
-            dp_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', dp.lower()))
-            if dp_words & title_keywords:
-                author_cand = '. '.join(dot_parts[:idx]).strip(' ,.-')
-                title_cand = dp.split(',')[0].strip(' ,.-')
-                if len(author_cand) >= 3 and len(title_cand) >= 3:
-                    return author_cand, _clean_book_title(title_cand)
-
-    # 2. Year pattern e.g. Author(s),? (Year),? Title, Publisher...
+    # 3. Year pattern: Author (Year) Title
     year_m = re.search(r'^(.*?)\s*,?\s*\(\s*((?:19|20)\d{2})\s*\)\s*[:,\-–]?\s*(.*)$', raw)
     if year_m and len(year_m.group(3).strip(" ,.-–")) >= 3:
-        author_cand = year_m.group(1).strip(" ,.-–")
-        author_cand = re.sub(r'^(?:\[?\d+[\.\)\]\:]*|\u2022|\-)\s*', '', author_cand).strip()
+        author_cand = _clean_book_author(year_m.group(1))
         rest_cand = year_m.group(3).strip(" ,.-–")
         if author_cand and len(author_cand) >= 3 and not any(k in author_cand.lower() for k in ["textbook", "reference", "edition"]):
-            m_split = re.split(
-                r',\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw|Wiley|Brooks/Cole|Cengage|Prentice|Pearson|PHI|Oxford|Cambridge|Springer|New\s+Age)\b',
-                rest_cand,
-                flags=re.I
-            )
-            if len(m_split) > 1 and len(m_split[0].strip()) >= 3:
-                title_cand = m_split[0].strip(" ,.-")
-            else:
-                r_parts = [p.strip() for p in rest_cand.split(",") if p.strip()]
-                title_cand = r_parts[0].strip(" ,.-") if r_parts else rest_cand.strip(" ,.-")
-            return author_cand.strip(" ,.-"), _clean_book_title(title_cand)
+            m_split = _PUBLISHER_REGEX.split(rest_cand)
+            title_cand = m_split[0].strip(" ,.-") if m_split and m_split[0].strip() else rest_cand.split(",")[0].strip()
+            return author_cand, _clean_book_title(title_cand)
+
+    # 3b. Name Initial. Title e.g. "Senthilkumar G. Engineering Physics II" or "Kumar D.S., Mechanical Measurements"
+    initial_author_m = re.search(r'^([A-Z][a-zA-Z]{3,}\s+(?:[A-Z]\.?\s*)+)\.\s+([A-Z].*)$', raw)
+    if initial_author_m:
+        cand_auth = initial_author_m.group(1).strip()
+        cand_rest = initial_author_m.group(2).strip()
+        title_cand = cand_rest.split(',')[0].strip()
+        if any(w in title_cand.lower() for w in title_keywords):
+            return _clean_book_author(cand_auth), _clean_book_title(title_cand)
 
     # Clean out parenthesized years like (2012) or (2007)
     cleaned = re.sub(r"\s*\(\s*(?:19|20)\d{2}\s*\)\s*", " ", raw)
     cleaned = re.sub(r"\s*\b(?:19|20)\d{2}\.?\s*", " ", cleaned)
     cleaned = re.sub(r"\s*\(\s*\)", " ", cleaned).strip(" ,.-;")
 
-    # 3. Colon handling
+    # Colon handling: "Author. Title: Subtitle" or "Title: Author and Author"
     if ":" in cleaned:
-        colon_m = re.search(r"^(.*?)\s*:\s*(.*)$", cleaned)
-        if colon_m:
-            left = colon_m.group(1).strip()
-            right = colon_m.group(2).strip()
-            right_first = right.split(",")[0].strip()
+        c_parts = cleaned.split(":", 1)
+        c0, c1 = c_parts[0].strip(), c_parts[1].strip()
 
-            # 3a. If right is just a volume number like ': 1' or ': Vol 2'
-            if re.match(r"^(?:vol\.?\s*)?\d+$", right_first, re.I):
-                left_parts = [p.strip() for p in left.split(",") if p.strip()]
-                if len(left_parts) >= 2:
-                    return left_parts[0].strip(" ,.-"), ", ".join(left_parts[1:]).strip(" ,.-")
+        # Case 1: Author. Title: Subtitle (e.g. Pickett and Laster. Technical English: Writing, Reading and Speaking...)
+        if "." in c0 and not re.search(r'\b(?:Dr|Mr|Mrs|Prof|[A-Z]\.[A-Z]?)\b', c0):
+            dot_split = c0.rsplit(".", 1)
+            cand_auth = dot_split[0].strip()
+            cand_t = dot_split[1].strip()
+            if len(cand_auth) >= 3 and len(cand_t) >= 3:
+                sub = c1.split(',')[0].strip()
+                return _clean_book_author(cand_auth), _clean_book_title(f"{cand_t}: {sub}")
 
-            # 3b. If left has author before comma, e.g. 'Robert C. Seacord, Effective C: An Introduction...'
-            if "," in left:
-                left_parts = [p.strip() for p in left.split(",") if p.strip()]
-                found_idx = None
-                for idx, lp in enumerate(left_parts):
-                    lp_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", lp.lower()))
-                    if lp_words & title_keywords:
-                        found_idx = idx
-                        break
-                if found_idx is not None and found_idx > 0:
-                    author_c = ", ".join(left_parts[:found_idx])
-                    title_c = ", ".join(left_parts[found_idx:]) + f": {right_first}"
-                    return author_c.strip(" ,.-"), _clean_book_title(title_c)
-                elif len(left_parts) >= 2:
-                    if "." in left_parts[1]:
-                        dot_sp = left_parts[1].split(".", 1)
-                        if any(w in dot_sp[1].lower() for w in title_keywords):
-                            author_c = f"{left_parts[0]}, {dot_sp[0]}".strip(" ,.-")
-                            title_c = f"{dot_sp[1].strip()}: {right_first}"
-                            return author_c, _clean_book_title(title_c)
-                    author_c = left_parts[0]
-                    title_c = f"{', '.join(left_parts[1:])}: {right_first}"
-                    return author_c.strip(" ,.-"), _clean_book_title(title_c)
+        # Case 2: Title: Author and Author (e.g. Mechanical Engineering Design: Joseph E Shigley and Charles R. Mischke)
+        c0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", c0.lower()))
+        c1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", c1.lower()))
+        if (c0_words & title_keywords) and (' and ' in c1.lower() or '&' in c1) and not (c1_words & title_keywords):
+            return _clean_book_author(c1.split(',')[0]), _clean_book_title(c0)
 
-            # 3c. Author. Title: Subtitle (e.g. Pickett and Laster. Technical English: Writing...)
-            if "." in left and not re.search(r"\b(?:Dr|Mr|Mrs|Prof|[A-Z]\.[A-Z]?)\b", left):
-                dot_split = left.split(".", 1)
-                author_res = dot_split[0].strip(" ,.-")
-                title_res = f"{dot_split[1].strip(' ,.-')}: {right_first}"
-                return author_res.strip(" ,.-"), _clean_book_title(title_res)
+    # 4. Multi-part dash splitting: e.g. "Title – Subtitle – Author, Publisher" or "Title - I, II, III - Cambridge"
+    dash_parts = [p.strip() for p in re.split(r'\s*[\u2013\u2014\-–—]\s*|(?<=[a-z0-9])\-(?=[A-Z])', cleaned) if p.strip()]
+    if len(dash_parts) >= 3:
+        p0, p1, p2 = dash_parts[0], dash_parts[1], dash_parts[2]
+        p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
+        p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
+        if ('&' in p0 or ' and ' in p0.lower()) and (p1_words & title_keywords):
+            return _clean_book_author(p0), _clean_book_title(p1)
 
-            # 3d. Author(s) : Title, Publisher (e.g. Martinez : Exploratory Data Analysis)
-            if not any(k in left.lower() for k in ["text book", "reference book", "publisher", "isbn", "url", "http"]):
-                return left.strip(" ,.-"), _clean_book_title(right_first)
-
-    # 4. Check for Author. Title pattern
-    dot_m = re.match(r"^([A-Z][a-zA-Z\s&,]{3,40}(?<!\b[A-Z]))\.\s+([A-Z][^,]{4,80}(?:,\s*[^,]{4,60})?)(?:,\s*.*)?$", cleaned)
-    if dot_m and not any(p in dot_m.group(1).lower() for p in ["grammar", "english for", "practical", "textbook"]):
-        author = dot_m.group(1).strip()
-        title = dot_m.group(2).strip()
-        if "," in title and any(pub in title.lower() for pub in ["publisher", "press", "edition", "wiley", "mcgraw"]):
-            title = title.split(",")[0].strip()
-        return author.strip(" ,.-"), _clean_book_title(title)
-
-    # 4b. Hyphen between Title and Author
-    if (" - " in cleaned or " – " in cleaned or "- " in cleaned) and "," in cleaned:
-        first_segment = cleaned.split(",")[0].strip()
-        h_match = re.search(r'^(.*?)\s*[\-–]\s*(.*)$', first_segment)
-        if h_match:
-            left_h = h_match.group(1).strip()
-            right_h = h_match.group(2).strip()
-            if any(w in left_h.lower() for w in title_keywords):
-                return right_h.strip(" ,.-"), _clean_book_title(left_h)
-
-    # 5. Dash separator
-    if " - " in cleaned or " – " in cleaned:
-        sep = " – " if " – " in cleaned else " - "
-        parts = [p.strip() for p in cleaned.split(sep) if p.strip()]
-        if len(parts) >= 2:
-            p0, p1 = parts[0], parts[1]
-            p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
-            p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
-            if (p0_words & title_keywords) and not (p1_words & title_keywords):
-                return p1.strip(" ,.-"), _clean_book_title(p0)
-            return p0.strip(" ,.-"), _clean_book_title(p1)
-
-    # 6. Comma separated
-    parts = [p.strip() for p in cleaned.split(",") if p.strip() and p.strip() != "()"]
-
-    # 6a. Title-first check (e.g. 'Discrete Mathematics and its applications, Kenneth H. Rosen...')
-    if len(parts) >= 2:
-        p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", parts[0].lower()))
-        p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", parts[1].lower()))
-        if (p0_words & title_keywords) and not (p1_words & title_keywords):
-            title = parts[0]
-            author = parts[1]
-            return author.strip(" ,.-"), _clean_book_title(title)
-
-    # 6b. Author-first with title keyword search
-    found_idx = None
-    for idx, p in enumerate(parts):
-        p_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p.lower()))
-        if p_words & title_keywords:
-            found_idx = idx
-            break
-
-    if found_idx is not None and found_idx > 0:
-        author = ", ".join(parts[:found_idx]).strip(" ,.-")
-        title = parts[found_idx].strip(" ,.-")
-        extra_title = []
-        for extra in parts[found_idx+1:]:
-            if re.search(r'\b(?:publisher|press|edition|wiley|mcgraw|pearson|phi|springer|cengage|hall|oxford|cambridge|no starch|packt|bpb)\b', extra, re.I):
-                break
-            if len(extra_title) < 2 and not re.match(r'^\d+$', extra):
-                extra_title.append(extra)
+        if _is_roman_or_volume(p1):
+            if _PUBLISHER_REGEX.search(p2):
+                author = _clean_book_author(p2)
             else:
-                break
-        if extra_title:
-            title += ", " + ", ".join(extra_title)
-        return author, _clean_book_title(title)
+                author = _clean_book_author(p2.split(',')[0])
+            return author, _clean_book_title(p0)
+        else:
+            title = f"{p0}: {p1}"
+            p2_parts = [p.strip() for p in p2.split(',') if p.strip()]
+            author = _clean_book_author(p2_parts[0]) if p2_parts else "Unknown Author"
+            return author, _clean_book_title(title)
 
-    if len(parts) >= 3 and (len(parts[1]) <= 3 or re.match(r"^[A-Z](\.[A-Z]\.?)?$", parts[1].strip())):
-        author = f"{parts[0]}, {parts[1]}"
-        title = parts[2]
-        return author.strip(" ,.-"), _clean_book_title(title)
+    if len(dash_parts) == 2:
+        p0, p1 = dash_parts[0], dash_parts[1]
+        # E.g. "Grammar Builder - I, II, III, and Cambridge University Press."
+        if _is_roman_or_volume(p1) or re.match(r'^[IVXLCDM]+(?:,\s*[IVXLCDM]+)*\b', p1):
+            pub_m = _PUBLISHER_REGEX.search(p1)
+            pub_name = pub_m.group(0) if pub_m else ""
+            return pub_name or "Unknown Author", _clean_book_title(p0)
+        if _PUBLISHER_REGEX.search(p1) and not _PUBLISHER_REGEX.search(p0):
+            p1_parts = [p.strip() for p in p1.split(',') if p.strip()]
+            if len(p1_parts) >= 2:
+                author = _clean_book_author(p1_parts[0])
+                return author, _clean_book_title(p0)
+            elif len(p1_parts) == 1:
+                return _clean_book_author(p1_parts[0]), _clean_book_title(p0)
+        p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
+        p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
+        if (p0_words & title_keywords) and not (p1_words & title_keywords):
+            return _clean_book_author(p1.split(',')[0]), _clean_book_title(p0)
+        elif (p1_words & title_keywords) and not (p0_words & title_keywords):
+            return _clean_book_author(p0), _clean_book_title(p1.split(',')[0])
+        elif '&' in p0 or ' and ' in p0.lower():
+            return _clean_book_author(p0), _clean_book_title(p1.split(',')[0])
 
+    # 5. Split by dot followed by capital letter ONLY when NOT initials!
+    dot_author_m = re.search(r'^([A-Z][a-zA-Z\s&,]{2,}\b[a-zA-Z]{3,})\.\s+([A-Z].*)$', cleaned)
+    if dot_author_m:
+        cand_auth = dot_author_m.group(1).strip()
+        cand_rest = dot_author_m.group(2).strip()
+        if not any(k in cand_auth.lower() for k in ["engineering", "physics", "chemistry", "mathematics", "handbook"]):
+            title_cand = cand_rest.split(',')[0].strip()
+            return _clean_book_author(cand_auth), _clean_book_title(title_cand)
+
+    # 6. Comma separated analysis
+    parts = [p.strip() for p in cleaned.split(",") if p.strip() and p.strip() != "()"]
     if len(parts) >= 2:
-        return parts[0].strip(" ,.-"), _clean_book_title(parts[1].strip(" ,.-"))
+        p0 = parts[0]
+        p1 = parts[1]
+        is_initials_author = bool(re.match(r'^(?:[A-Z]\.\s*)+[A-Z][a-zA-Z]+$', p0)) or bool(re.match(r'^[A-Z][a-zA-Z]+\s+(?:[A-Z]\.\s*)+$', p0))
+        if is_initials_author:
+            return _clean_book_author(p0), _clean_book_title(p1)
+
+        if re.search(r'\b(?:Faculty|Department|Board|Committee)\s+of\b', p0, re.I):
+            return _clean_book_author(p0), _clean_book_title(p1)
+        if re.search(r'\b(?:Faculty|Department|Board|Committee)\s+of\b', p1, re.I):
+            return _clean_book_author(p1), _clean_book_title(p0)
+
+        p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
+        p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
+        if (p0_words & title_keywords) and not (p1_words & title_keywords):
+            return _clean_book_author(p1), _clean_book_title(p0)
+
+        found_idx = None
+        for idx, p in enumerate(parts):
+            pw = set(re.findall(r"\b[a-zA-Z]{3,}\b", p.lower()))
+            if pw & title_keywords:
+                found_idx = idx
+                break
+
+        if found_idx is not None and found_idx > 0:
+            author = ", ".join(parts[:found_idx]).strip()
+            title = parts[found_idx].strip()
+            return _clean_book_author(author), _clean_book_title(title)
+
+        return _clean_book_author(p0), _clean_book_title(p1)
+
+    # End-of-string author check: "Automobile engineering KIRPAL SINGH" or "Automobile engineering practices R.P GUPTA"
+    clean_raw = raw.strip(' ,.-;')
+    end_author_m = re.search(r'^(.*?)\s+((?:[A-Z]\.?\s*){1,3}[A-Z]{3,}|[A-Z]{3,}\s+[A-Z]{3,})\.?$', clean_raw)
+    if end_author_m:
+        t_cand = end_author_m.group(1).strip()
+        a_cand = end_author_m.group(2).strip()
+        if len(t_cand) >= 5 and any(w in t_cand.lower() for w in title_keywords):
+            return _clean_book_author(a_cand.title()), _clean_book_title(t_cand)
 
     return "Unknown Author", _clean_book_title(raw)
 

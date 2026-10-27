@@ -2535,6 +2535,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const data = await resp.json();
 
         const cardEl = document.getElementById(`book-card-${cardId}`);
+        if (data.parsed_author && data.parsed_author !== 'Unknown Author' && data.parsed_author !== 'I' && data.parsed_author !== 'Writing') {
+          const authorEl = cardEl ? cardEl.querySelector('.book-card-author') : null;
+          if (authorEl) {
+            authorEl.innerHTML = `<span class="text-slate-400 not-italic font-normal">By</span> <span class="text-indigo-950 font-semibold">${escapeJs(data.parsed_author)}</span>`;
+          }
+        }
         if (data.status === 'AVAILABLE') {
           if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-blue-500 bg-blue-50/70 shadow-sm flex flex-col justify-between space-y-2.5 transition';
           container.innerHTML = `
@@ -2830,7 +2836,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                 <h5 class="font-bold text-xs ${isAvail ? 'text-blue-950 font-extrabold' : 'text-slate-900'} mt-1.5 leading-snug">
                                   ${b.title || citationText}
                                 </h5>
-                                ${b.author ? `<div class="text-[10px] text-slate-500 italic mt-0.5">${b.author}</div>` : ''}
+                                ${(() => {
+                                  const a = (b.author || '').trim();
+                                  const t = (b.title || '').trim();
+                                  const isBadAuthor = !a || a === 'Unknown Author' || a === 'I' || a === 'II' || a === 'III' || a === 'Writing' || a.toLowerCase() === t.toLowerCase();
+                                  if (!isBadAuthor) {
+                                    return `<div class="text-[11px] text-slate-600 font-medium italic mt-1 flex items-center gap-1 book-card-author"><span class="text-slate-400 not-italic font-normal">By</span> <span class="text-indigo-950 font-semibold">${escapeJs(a)}</span></div>`;
+                                  } else {
+                                    return `<div class="text-[10px] text-slate-400 italic mt-0.5 book-card-author">Author: Academic / Departmental</div>`;
+                                  }
+                                })()}
                               </div>
 
                               <!-- Action Box -->
@@ -5513,7 +5528,7 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     parsed_b = parse_reference_book(cit)
                     if parsed_b.title and (len(b.get("title", "")) <= 3 or len(parsed_b.title) > len(b.get("title", ""))):
                         b["title"] = parsed_b.title
-                    if parsed_b.author and (len(b.get("author", "")) <= 3 or len(parsed_b.author) > len(b.get("author", ""))):
+                    if parsed_b.author and (len(b.get("author", "")) <= 2 or b.get("author") in ["Unknown Author", "I", "II", "Writing"] or b.get("author") == b.get("title") or len(parsed_b.author) > len(b.get("author", ""))):
                         b["author"] = parsed_b.author
                     b["_parsed_citation"] = cit
 
@@ -5526,6 +5541,12 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                         b["preview_url"] = cached.get("preview_url")
                         b["book_id"] = cached.get("book_id")
                         b["color"] = "blue" if cached.get("status") == "AVAILABLE" else "yellow"
+                        c_auth = (cached.get("parsed_author") or "").strip()
+                        if c_auth and c_auth not in ["Unknown Author", "I", "II", "Writing"] and (not b.get("author") or len(b.get("author", "")) <= 2 or b.get("author") in ["Unknown Author", "I", "II", "Writing"] or b.get("author") == b.get("title")):
+                            b["author"] = c_auth
+                        c_title = (cached.get("parsed_title") or "").strip()
+                        if c_title and len(c_title) > 3 and (len(b.get("title", "")) <= 3 or b.get("title") in ["Resource Document", "Manual"]):
+                            b["title"] = c_title
                     else:
                         uncached_indices.append(idx)
 
@@ -5549,6 +5570,8 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                             books[idx_pos]["book_id"] = res.book_id
                             books[idx_pos]["color"] = "blue" if res.status == "AVAILABLE" else "yellow"
                             books[idx_pos]["reason"] = res.reason
+                            if res.parsed_author and res.parsed_author not in ["Unknown Author", "I", "II", "Writing"]:
+                                books[idx_pos]["author"] = res.parsed_author
 
                 # For remaining books, assign safe default so the UI renders all courses & books instantly!
                 for idx_pos in remaining_indices:

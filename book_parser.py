@@ -115,25 +115,6 @@ def parse_reference_book(raw_citation: str) -> ParsedBook:
         flags=re.IGNORECASE
     ).strip()
 
-    title_keywords = {
-        "microprocessor", "microprocessors", "microcontroller", "microcontrollers",
-        "peripheral", "peripherals", "circuit", "circuits", "device", "devices",
-        "computer", "computing", "electric", "electrical", "power", "signal",
-        "signals", "processing", "communication", "communications", "network",
-        "networks", "database", "databases", "operating", "digital", "analog",
-        "linear", "control", "learning", "vision", "robotics", "intelligence",
-        "structure", "structures", "algorithm", "algorithms", "language",
-        "programming", "architecture", "principles", "applications", "fundamentals",
-        "mechanics", "physics", "chemistry", "biology", "mathematics", "calculus",
-        "algebra", "geometry", "statistics", "statistical", "inference", "analytics",
-        "science", "theory", "engineering", "management", "english", "grammar",
-        "systems", "system", "introduction", "technology", "design", "handbook",
-        "guide", "data", "analysis", "modeling", "predictive", "multivariate",
-        "discrete", "graph", "environmental", "environment", "materials",
-        "strength", "advanced", "textbook", "elements", "effective", "expert",
-        "professional", "usage", "practical", "unix", "internals", "fuel", "cell", "cells"
-    }
-
     # Step 0b: Check if citation contains a direct website or PDF URL
     url_match = re.search(r'(https?://[^\s,]+)', cleaned_raw)
     direct_url = url_match.group(1).rstrip('.)]') if url_match else None
@@ -147,251 +128,22 @@ def parse_reference_book(raw_citation: str) -> ParsedBook:
     cleaned, year = extract_year(cleaned)
     cleaned, edition = extract_edition(cleaned)
 
-    # Step 2b: Quoted title check
-    quoted_match = re.search(r'["\u201c\u201d\']([^"\u201c\u201d\']{3,})["\u201c\u201d\']', cleaned)
-    if quoted_match:
-        title = quoted_match.group(1).strip()
-        before_quote = cleaned[:quoted_match.start()].strip(" ,-–;:")
-        author = before_quote if before_quote else ""
-        return ParsedBook(
-            raw_citation=raw_citation,
-            title=title.strip(" ,.-"),
-            author=author.strip(" ,.-"),
-            edition=edition,
-            year=year,
-            direct_url=direct_url
-        )
+    # Step 3: High-precision title and author extraction via unified parser
+    from reference_book_engine import _parse_book_citation
+    author, title = _parse_book_citation(cleaned_raw)
 
-    # Step 2b-2: Natural language 'Title by Author' check
-    by_m = re.search(r'^(.*?)\s+\bby\s+(.*)$', cleaned, flags=re.IGNORECASE)
-    if by_m:
-        t_cand = by_m.group(1).strip(" ,.-–:")
-        a_cand = by_m.group(2).strip(" ,.-–:")
-        if len(t_cand) >= 3 and len(a_cand) >= 3:
-            return ParsedBook(
-                raw_citation=raw_citation,
-                title=t_cand,
-                author=a_cand,
-                edition=edition,
-                year=year,
-                direct_url=direct_url
-            )
+    if not title or title.lower() in {'resource document', 'manual'}:
+        title = cleaned or (direct_url or "Resource Document")
 
-    # Step 2c: Year pattern e.g. Author(s),? (Year),? Title, Publisher...
-    # (e.g. Raj Kumar Singh, (2012), Environmental Studies...)
-    year_m = re.search(r'^(.*?)\s*,?\s*\(\s*((?:19|20)\d{2})\s*\)\s*[:,\-–]?\s*(.*)$', cleaned_raw)
-    if year_m:
-        author_cand = year_m.group(1).strip(" ,.-–")
-        author_cand = re.sub(r'^(?:\[?\d+[\.\)\]\:]*|\u2022|\-)\s*', '', author_cand).strip()
-        rest_cand = year_m.group(3).strip(" ,.-–")
-        if author_cand and len(author_cand) >= 3 and not any(k in author_cand.lower() for k in ["textbook", "reference", "edition"]):
-            q_in_rest = re.search(r'["\u201c\u201d]([^"\u201c\u201d]{3,120})["\u201c\u201d]', rest_cand)
-            if q_in_rest:
-                title_cand = q_in_rest.group(1).strip(" ,.-")
-            else:
-                m_split = re.split(r',\s*(?:\d+(?:st|nd|rd|th)?\s+Ed(?:ition)?|Tata\s+McGraw|McGraw|Wiley|Brooks/Cole|Cengage|Prentice|Pearson|PHI|Oxford|Cambridge|Springer|New\s+Age)\b', rest_cand, flags=re.I)
-                if len(m_split) > 1 and len(m_split[0].strip()) >= 3:
-                    title_cand = m_split[0].strip(" ,.-")
-                else:
-                    r_parts = [p.strip() for p in rest_cand.split(",") if p.strip()]
-                    title_cand = r_parts[0].strip(" ,.-") if r_parts else rest_cand.strip(" ,.-")
-            return ParsedBook(
-                raw_citation=raw_citation,
-                title=title_cand.strip(" ,.-"),
-                author=author_cand.strip(" ,.-"),
-                edition=edition,
-                year=year_m.group(2),
-                direct_url=direct_url
-            )
+    # Filter out placeholder or corrupted authors
+    clean_auth = author.strip(" \"'")
+    if clean_auth in {"Unknown Author", "I", "II", "III", "IV", "V", "Writing"} or clean_auth.lower() == title.lower():
+        clean_auth = ""
 
-    # Clean out parenthesized years like (2012) or (2007)
-    cleaned = re.sub(r'\s*\(\s*(?:19|20)\d{2}\s*\)\s*', ' ', cleaned)
-    cleaned = re.sub(r'\s*\b(?:19|20)\d{2}\.?\s*', ' ', cleaned)
-    cleaned = re.sub(r'\s*\(\s*\)', ' ', cleaned).strip(" ,.-;")
-
-    # Step 3: Colon handling
-    if ":" in cleaned:
-        colon_m = re.search(r'^(.*?)\s*:\s*(.*)$', cleaned)
-        if colon_m:
-            left = colon_m.group(1).strip()
-            right = colon_m.group(2).strip()
-            right_first = right.split(",")[0].strip()
-
-            # If right is volume number like ': 1'
-            if re.match(r"^(?:vol\.?\s*)?\d+$", right_first, re.I):
-                left_parts = [p.strip() for p in left.split(",") if p.strip()]
-                if len(left_parts) >= 2:
-                    return ParsedBook(
-                        raw_citation=raw_citation,
-                        title=", ".join(left_parts[1:]).strip(" ,.-"),
-                        author=left_parts[0].strip(" ,.-"),
-                        edition=edition,
-                        year=year,
-                        direct_url=direct_url
-                    )
-
-            # If left has author before comma, e.g. 'Robert C. Seacord, Effective C: An Introduction...'
-            if "," in left:
-                left_parts = [p.strip() for p in left.split(",") if p.strip()]
-                found_idx = None
-                for idx, lp in enumerate(left_parts):
-                    lp_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", lp.lower()))
-                    if lp_words & title_keywords:
-                        found_idx = idx
-                        break
-                if found_idx is not None and found_idx > 0:
-                    author_c = ", ".join(left_parts[:found_idx])
-                    title_c = ", ".join(left_parts[found_idx:]) + f": {right_first}"
-                    return ParsedBook(
-                        raw_citation=raw_citation,
-                        title=title_c.strip(" ,.-"),
-                        author=author_c.strip(" ,.-"),
-                        edition=edition,
-                        year=year,
-                        direct_url=direct_url
-                    )
-                elif len(left_parts) >= 2:
-                    author_c = left_parts[0]
-                    title_c = f"{', '.join(left_parts[1:])}: {right_first}"
-                    return ParsedBook(
-                        raw_citation=raw_citation,
-                        title=title_c.strip(" ,.-"),
-                        author=author_c.strip(" ,.-"),
-                        edition=edition,
-                        year=year,
-                        direct_url=direct_url
-                    )
-
-            # Author. Title: Subtitle (e.g. Pickett and Laster. Technical English: Writing...)
-            if "." in left and not re.search(r"\b(?:Dr|Mr|Mrs|Prof|[A-Z]\.[A-Z]?)\b", left):
-                dot_split = left.split(".", 1)
-                author_res = dot_split[0].strip(" ,.-")
-                title_res = f"{dot_split[1].strip(' ,.-')}: {right_first}"
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=title_res.strip(" ,.-"),
-                    author=author_res.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-
-            left_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", left.lower()))
-            if left_words & title_keywords:
-                # Left is title: e.g. 'Effective C: An Introduction to Professional C Programming, Robert C. Seacord'
-                r_parts = [p.strip() for p in right.split(",") if p.strip()]
-                if len(r_parts) >= 2:
-                    title_res = f"{left}: {r_parts[0]}"
-                    author_res = r_parts[1]
-                else:
-                    title_res = f"{left}: {right_first}"
-                    author_res = ""
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=title_res.strip(" ,.-"),
-                    author=author_res.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-
-            # Author(s) : Title, Publisher (e.g. Martinez : Exploratory Data Analysis)
-            if not any(k in left.lower() for k in ["text book", "reference book", "publisher", "isbn", "url", "http"]):
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=right_first.strip(" ,.-"),
-                    author=left.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-
-    # Step 4: Hyphen between Title and Author
-    if (" - " in cleaned or " – " in cleaned or "- " in cleaned) and "," in cleaned:
-        first_segment = cleaned.split(",")[0].strip()
-        h_match = re.search(r'^(.*?)\s*[\-–]\s*(.*)$', first_segment)
-        if h_match:
-            left_h = h_match.group(1).strip()
-            right_h = h_match.group(2).strip()
-            if any(w in left_h.lower() for w in title_keywords):
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=left_h.strip(" ,.-"),
-                    author=right_h.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-
-    # Step 5: Dash separator
-    if " - " in cleaned or " – " in cleaned:
-        sep = " – " if " – " in cleaned else " - "
-        parts = [p.strip() for p in cleaned.split(sep) if p.strip()]
-        if len(parts) >= 2:
-            p0, p1 = parts[0], parts[1]
-            p0_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p0.lower()))
-            p1_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p1.lower()))
-            if (p0_words & title_keywords) and not (p1_words & title_keywords):
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=p0.strip(" ,.-"),
-                    author=p1.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-            return ParsedBook(
-                raw_citation=raw_citation,
-                title=p1.strip(" ,.-"),
-                author=p0.strip(" ,.-"),
-                edition=edition,
-                year=year,
-                direct_url=direct_url
-            )
-
-    # Step 6: Comma separated
-    parts = [p.strip() for p in cleaned.split(",") if p.strip() and p.strip() != "()"]
-    if len(parts) >= 3 and (len(parts[1]) <= 3 or re.match(r'^[A-Z](\.[A-Z]\.?)?$', parts[1].strip())):
-        author_candidate = f"{parts[0]}, {parts[1]}"
-        title_candidate = parts[2]
-        return ParsedBook(
-            raw_citation=raw_citation,
-            title=title_candidate.strip(" ,.-"),
-            author=author_candidate.strip(" ,.-"),
-            edition=edition,
-            year=year,
-            direct_url=direct_url
-        )
-
-    if len(parts) >= 2:
-        for idx, p in enumerate(parts):
-            p_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", p.lower()))
-            if p_words & title_keywords:
-                title_c = p
-                authors = [parts[i] for i in range(idx)]
-                author_c = ", ".join(authors) if authors else (parts[idx+1] if idx+1 < len(parts) else "Unknown Author")
-                return ParsedBook(
-                    raw_citation=raw_citation,
-                    title=title_c.strip(" ,.-"),
-                    author=author_c.strip(" ,.-"),
-                    edition=edition,
-                    year=year,
-                    direct_url=direct_url
-                )
-        return ParsedBook(
-            raw_citation=raw_citation,
-            title=parts[1].strip(" ,.-"),
-            author=parts[0].strip(" ,.-"),
-            edition=edition,
-            year=year,
-            direct_url=direct_url
-        )
-
-    # Step 7: Fallback
     return ParsedBook(
         raw_citation=raw_citation,
-        title=cleaned or (direct_url or "Resource Document"),
-        author="",
+        title=title.strip(" \"'"),
+        author=clean_auth,
         edition=edition,
         year=year,
         direct_url=direct_url

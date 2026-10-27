@@ -269,7 +269,7 @@ def check_internet_archive_direct(parsed: ParsedBook) -> Tuple[Optional[Availabi
 # ===========================================================================
 # Source C: Google Books API
 # ===========================================================================
-def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult], Optional[str]]:
+def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult], Optional[str], Optional[str]]:
     """
     Queries Google Books API (https://www.googleapis.com/books/v1/volumes).
 
@@ -277,10 +277,13 @@ def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult]
     - accessInfo.pdf.isAvailable must be True
     - accessInfo.pdf.downloadLink must be present
     - Preview-only or snippet-only results must NOT be counted as AVAILABLE
+    Also captures and returns matched metadata (authors) from Google Books.
     """
     base_url = "https://www.googleapis.com/books/v1/volumes"
     headers = {"User-Agent": settings.USER_AGENT}
     primary_author = parsed.author.split(',')[0].split('&')[0].split(' and ')[0].strip() if parsed.author else ""
+    if primary_author.lower() in {"unknown author", "i", "ii", "writing", "manual"} or len(primary_author) <= 2:
+        primary_author = ""
     q = f'"{parsed.title}" {primary_author}'.strip() if primary_author else f'"{parsed.title}"'
 
     params: Dict[str, Any] = {
@@ -306,7 +309,14 @@ def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult]
                 if resp2.status_code == 200:
                     items = resp2.json().get("items", [])
 
+            if not items:
+                params["q"] = parsed.title
+                resp3 = client.get(base_url, params=params, headers=headers)
+                if resp3.status_code == 200:
+                    items = resp3.json().get("items", [])
+
             best_preview = None
+            matched_author = None
             for item in items:
                 vinfo = item.get("volumeInfo", {})
                 ainfo = item.get("accessInfo", {})
@@ -314,6 +324,10 @@ def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult]
                 candidate_title = vinfo.get("title", "")
                 if not is_title_match(parsed.title, candidate_title):
                     continue
+
+                authors = vinfo.get("authors", [])
+                if authors and not matched_author:
+                    matched_author = ", ".join(authors)
 
                 preview_link = vinfo.get("previewLink") or vinfo.get("infoLink")
                 if preview_link and not best_preview:
@@ -326,8 +340,7 @@ def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult]
 
                 # If available and download link is present:
                 if is_available and download_link:
-                    authors = vinfo.get("authors", [])
-                    author_str = ", ".join(authors) if authors else parsed.author
+                    author_str = ", ".join(authors) if authors else (matched_author or parsed.author)
                     return AvailabilityResult(
                         status="AVAILABLE",
                         source="google_books",
@@ -337,13 +350,13 @@ def check_google_books(parsed: ParsedBook) -> Tuple[Optional[AvailabilityResult]
                         parsed_title=candidate_title,
                         parsed_author=author_str,
                         reason="Free public download via Google Books"
-                    ), preview_link or best_preview
+                    ), preview_link or best_preview, matched_author
 
-            return None, best_preview
+            return None, best_preview, matched_author
 
     except Exception as exc:
         logger.warning(f"Google Books API check error for '{parsed.title}': {exc}")
-        return None, None
+        return None, None, None
 
 
 # ===========================================================================
@@ -524,10 +537,15 @@ def check_book_availability(raw_citation: str, use_cache: bool = True) -> Availa
     best_preview_url: Optional[str] = parsed.direct_url
 
     # Step 3a: Primary Online Source 1 - Google Books API (uses GOOGLE_BOOKS_API_KEY)
-    gb_result, gb_preview = check_google_books(parsed)
+    gb_result, gb_preview, gb_author = check_google_books(parsed)
+    if gb_author and (not parsed.author or len(parsed.author) <= 2 or parsed.author in ["Unknown Author", "I", "II", "Writing", "Manual"] or parsed.author.lower() == parsed.title.lower()):
+        parsed.author = gb_author
+
     if gb_preview and not best_preview_url:
         best_preview_url = gb_preview
     if gb_result:
+        if gb_author:
+            gb_result.parsed_author = parsed.author
         saved = save_book_cache(
             raw_citation=raw_citation,
             parsed_title=parsed.title,
