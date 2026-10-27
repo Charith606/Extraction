@@ -196,11 +196,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
         <div class="sidebar-text min-w-0">
           <h1 class="font-extrabold text-sm tracking-tight text-slate-900 leading-tight truncate">Syllabus Studio</h1>
-          <div class="flex items-center gap-1.5 mt-0.5">
-            <span class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">v2.5 Pro</span>
-            <span class="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span class="text-[9px] text-emerald-600 font-semibold">Active</span>
-          </div>
+          <p class="text-[10px] text-slate-400 truncate">Course & Reference Extraction</p>
         </div>
       </div>
       <!-- Adjustable Collapse / Expand Toggle Button -->
@@ -1548,20 +1544,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- ======================================================== -->
-          <!-- STEP 1: REFERENCE BOOK DETAILS & FULL CHAPTER DIRECTORY -->
-          <!-- ======================================================== -->
+          <!-- REFERENCE BOOK DETAILS & FULL CHAPTER DIRECTORY -->
           <div id="refBookDetailsDirectoryCard" class="p-5 rounded-2xl bg-white border-2 border-indigo-200 shadow-sm space-y-4">
             <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 border-b border-indigo-100 pb-3">
               <div>
-                <div class="flex items-center gap-2">
-                  <span class="w-6 h-6 rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-200 font-extrabold text-xs inline-flex items-center justify-center shrink-0 shadow-2xs">
-                    1
-                  </span>
-                  <h4 class="font-bold text-sm text-slate-900 flex items-center gap-1.5">
-                    <span>📖</span> Reference Book Details & Table of Contents
-                  </h4>
-                </div>
+                <h4 class="font-bold text-sm text-slate-900 flex items-center gap-1.5">
+                  <span>📖</span> Reference Book Details & Table of Contents
+                </h4>
                 <p class="text-xs text-slate-500 mt-1">
                   All units, chapters, and exact page ranges indexed from the reference PDF. Click "🔍 Locate" on any chapter to jump to search.
                 </p>
@@ -1616,20 +1605,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             </div>
           </div>
 
-          <!-- ======================================================== -->
-          <!-- STEP 2: DEEP SUB-TOPIC SEARCH BOX & PAGE LOCATOR        -->
-          <!-- ======================================================== -->
+          <!-- DEEP SUB-TOPIC SEARCH BOX & PAGE LOCATOR -->
           <div id="deepSearchSectionCard" class="p-5 rounded-2xl bg-white border-2 border-emerald-200 shadow-sm space-y-3.5">
             <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-emerald-100 pb-3">
               <div>
-                <div class="flex items-center gap-2">
-                  <span class="w-6 h-6 rounded-lg bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold text-xs inline-flex items-center justify-center shrink-0 shadow-2xs">
-                    2
-                  </span>
-                  <h4 class="font-bold text-sm text-slate-900 flex items-center gap-1.5">
-                    <span>🔎</span> Search Specific Sub-Topic in this Reference Book
-                  </h4>
-                </div>
+                <h4 class="font-bold text-sm text-slate-900 flex items-center gap-1.5">
+                  <span>🔎</span> Search Specific Sub-Topic in this Reference Book
+                </h4>
                 <p class="text-xs text-slate-500 mt-1">
                   Type any topic name or click a suggested topic below to pinpoint exact page ranges in the reference book.
                 </p>
@@ -1692,8 +1674,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <div class="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
           <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-2 border-b border-slate-100 pb-3">
             <div>
-              <h3 class="text-lg font-bold text-slate-900">Task 1: Discovered Course Syllabi</h3>
-              <p class="text-xs text-slate-500">Document: ${data.document} · Click any course card to inspect full Task 2 syllabus</p>
+              <h3 class="text-lg font-bold text-slate-900">Discovered Course Syllabi</h3>
+              <p class="text-xs text-slate-500">Document: ${data.document} · Click any course card to inspect full course syllabus & details</p>
             </div>
             <div class="flex items-center gap-2 flex-wrap">
               <span class="px-3 py-1 rounded-full bg-blue-50 text-blue-700 font-bold text-xs border border-blue-200">
