@@ -793,6 +793,55 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     let savedDocsList = [];
     let savedRefBooksList = [];
 
+    function resetSearchAndResultsToNew() {
+      // 1. Clear global syllabus search input and hide dropdown
+      if (typeof clearGlobalSearch === 'function') {
+        clearGlobalSearch();
+      } else {
+        const inp = document.getElementById('globalSyllabusSearchInput');
+        if (inp) inp.value = '';
+        const clearBtn = document.getElementById('clearGlobalSearchBtn');
+        if (clearBtn) clearBtn.classList.add('hidden');
+        const container = document.getElementById('globalSearchResultsContainer');
+        if (container) container.classList.add('hidden');
+      }
+
+      // 2. Clear subtopic search input, hide autocomplete & result box
+      const subtopicInp = document.getElementById('subtopicQueryInput');
+      if (subtopicInp) subtopicInp.value = '';
+      const clearSubtopicBtn = document.getElementById('clearSubtopicInputBtn');
+      if (clearSubtopicBtn) clearSubtopicBtn.classList.add('hidden');
+      const subtopicDrop = document.getElementById('subtopicSuggestionsDropdown');
+      if (subtopicDrop) subtopicDrop.classList.add('hidden');
+      const subtopicResult = document.getElementById('subtopicResultBox');
+      if (subtopicResult) {
+        subtopicResult.classList.add('hidden');
+        subtopicResult.innerHTML = '';
+      }
+
+      // 3. Clear books search input in books hub
+      const booksInp = document.getElementById('syllabusBooksSearchInput');
+      if (booksInp) booksInp.value = '';
+
+      // 4. Clear any reference book results container
+      const refBookRes = document.getElementById('refBookResultsContainer');
+      if (refBookRes) {
+        refBookRes.classList.add('hidden');
+        refBookRes.innerHTML = '';
+      }
+
+      // 5. Hide the main results section completely so screen is clean as new
+      const results = document.getElementById('resultsContainer');
+      if (results) results.classList.add('hidden');
+
+      // 6. Reset in-memory search and course states
+      lastDiscoveredData = null;
+      window.currentCourseTask2Data = null;
+      window.locatorReturnCourse = null;
+      selectedCourseCode = null;
+      selectedCoursePage = null;
+    }
+
     async function restorePreviousSession() {
       try {
         const [docsRes, booksRes] = await Promise.all([
@@ -834,7 +883,31 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           }
         }
 
-        // 3. Restore user's exact active view (Task 1, Task 2, Books Hub, or Locator)
+        // 3. Fresh App Launch Detection:
+        // When the user closes the application (closing browser tab or window) and re-opens it,
+        // sessionStorage is completely reset. Detect this and restore the app to brand new state!
+        const isFreshLaunch = !sessionStorage.getItem('app_session_active');
+        if (isFreshLaunch) {
+          sessionStorage.setItem('app_session_active', '1');
+          localStorage.removeItem('active_app_view');
+          localStorage.removeItem('selected_course_code');
+          localStorage.removeItem('selected_course_page');
+          localStorage.removeItem('locator_return_course');
+          try {
+            Object.keys(localStorage).forEach(k => {
+              if (k.startsWith('cached_discovered_')) {
+                localStorage.removeItem(k);
+              }
+            });
+          } catch(e) {}
+          if (window.location.hash) {
+            try { history.replaceState(null, '', window.location.pathname); } catch(e) {}
+          }
+          resetSearchAndResultsToNew();
+          return; // Start clean: do not restore old search views or drilldowns!
+        }
+
+        // Within the active session: Restore user's view if navigating within the app
         const hash = window.location.hash || '';
         const savedView = localStorage.getItem('active_app_view') || 'task1';
 
@@ -842,7 +915,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           if (localFilePath) {
             await openSyllabusBooksHub(localFilePath, currentDocLabel, false);
           } else {
-            uploadAndExtract('', 'discover');
+            resetSearchAndResultsToNew();
           }
         } else if (hash.startsWith('#task2') || savedView === 'task2') {
           const savedCourseCode = localStorage.getItem('selected_course_code');
@@ -850,20 +923,12 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           if (savedCourseCode) {
             drilldownCourse(savedCourseCode, savedCoursePage ? parseInt(savedCoursePage) : null, false);
           } else {
-            uploadAndExtract('', 'discover');
+            resetSearchAndResultsToNew();
           }
         } else if (hash.startsWith('#locator') || savedView === 'locator') {
           await openReferenceBookWorkspace(currentRefBookPath, null, false);
-        } else if (localFilePath) {
-          // If we had previously cached courses, show them without triggering a new extraction process
-          const cached = localStorage.getItem('cached_discovered_' + localFilePath);
-          if (cached) {
-            try {
-              lastDiscoveredData = JSON.parse(cached);
-              renderTask1(lastDiscoveredData);
-              document.getElementById('resultsContainer')?.classList.remove('hidden');
-            } catch(e) {}
-          }
+        } else {
+          resetSearchAndResultsToNew();
         }
       } catch (err) {
         console.error('Session restore error:', err);
