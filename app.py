@@ -2306,6 +2306,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                       <div>
                         <div class="flex justify-between items-start gap-2">
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-800">Textbook</span>
+                          <div id="book-status-pill-tb-${idx}"></div>
                         </div>
                         <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug">${tb}</h5>
                       </div>
@@ -2333,6 +2334,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                       <div>
                         <div class="flex justify-between items-start gap-2">
                           <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-100 text-purple-800">Reference Book</span>
+                          <div id="book-status-pill-rb-${idx}"></div>
                         </div>
                         <h5 class="font-bold text-xs text-slate-900 mt-1.5 leading-snug">${rb}</h5>
                       </div>
@@ -2507,6 +2509,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     // -------------------------------------------------------------
     // Legal Book Availability & Auto-Download Handler
     // -------------------------------------------------------------
+    function updateHubHeaderBadges() {
+      const availCount = (currentSyllabusBooks || []).filter(b => b.status === 'AVAILABLE' || b.color === 'blue').length;
+      const noAccCount = (currentSyllabusBooks || []).filter(b => b.status === 'NO_ACCESS' || b.color === 'yellow').length;
+      const elAvail = document.getElementById('hub-badge-avail-count');
+      const elNoAcc = document.getElementById('hub-badge-noacc-count');
+      if (elAvail) elAvail.innerText = `🔵 ${availCount} Can Download`;
+      if (elNoAcc) elNoAcc.innerText = `🟡 ${noAccCount} Protected (Copyright)`;
+    }
+
     async function checkAndDownloadBook(citation, cardId, bypassCache = false) {
       const container = document.getElementById(`book-access-box-${cardId}`);
       if (!container) return;
@@ -2535,32 +2546,72 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         const data = await resp.json();
 
         const cardEl = document.getElementById(`book-card-${cardId}`);
+        const statusPill = document.getElementById(`book-status-pill-${cardId}`);
+
         if (data.parsed_author && data.parsed_author !== 'Unknown Author' && data.parsed_author !== 'I' && data.parsed_author !== 'Writing') {
           const authorEl = cardEl ? cardEl.querySelector('.book-card-author') : null;
           if (authorEl) {
             authorEl.innerHTML = `<span class="text-slate-400 not-italic font-normal">By</span> <span class="text-indigo-950 font-semibold">${escapeJs(data.parsed_author)}</span>`;
           }
         }
+
         if (data.status === 'AVAILABLE') {
-          if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-blue-500 bg-blue-50/70 shadow-sm flex flex-col justify-between space-y-2.5 transition';
+          if (cardEl) {
+            cardEl.className = 'p-3.5 rounded-xl border-2 border-blue-500 bg-blue-50/70 shadow-sm flex flex-col justify-between space-y-2.5 transition';
+          }
+          if (statusPill) {
+            statusPill.innerHTML = `
+              <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex items-center gap-1 shadow-2xs">
+                ✓ Can Download (${escapeJs(data.source === 'local_reference_book' ? 'Local Ref Book' : (data.source || 'Available'))})
+              </span>
+            `;
+          }
+
+          const dlUrl = data.download_endpoint || (data.download_url ? data.download_url : `/api/download/${data.book_id}`);
+          const safeTitle = (data.parsed_title || 'textbook').replace(/["'<>]/g, '').trim();
+
           container.innerHTML = `
-            <div class="space-y-1.5 w-full">
-              <div class="flex items-center justify-between text-[11px]">
-                <span class="font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded flex items-center gap-1">
-                  ✓ Available (${data.source || 'Verified'})
+            <div class="space-y-2 w-full pt-1">
+              <a href="${dlUrl}" target="_blank" rel="noopener noreferrer" download="${escapeJs(safeTitle)}.pdf" class="w-full text-[11px] font-bold py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+                <span>📥 Download Book PDF</span>
+              </a>
+              <div class="flex items-center justify-between text-[10px] text-slate-500 px-1">
+                <span class="text-blue-700 font-semibold flex items-center gap-1">
+                  ✓ Available (${escapeJs(data.source || 'Open Access')})
                 </span>
-                <a href="${data.download_endpoint || '/api/download/' + data.book_id}" target="_blank" rel="noopener noreferrer" download class="font-bold text-emerald-700 hover:text-emerald-900 underline text-[10px]">
-                  ⬇️ Download Again
-                </a>
+                ${data.preview_url ? `<a href="${data.preview_url}" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:text-blue-800 font-medium underline">Preview ↗</a>` : ''}
               </div>
             </div>
           `;
 
-          // Automatic safe download to user's device (never hijacks current tab)
-          triggerSafeDownload(data.download_endpoint || ('/api/download/' + data.book_id), (data.parsed_title || 'book') + '.pdf');
+          // Automatic safe download
+          triggerSafeDownload(dlUrl, safeTitle + '.pdf');
+
+          // Update in-memory data and hub counters
+          if (Array.isArray(currentSyllabusBooks)) {
+            const found = currentSyllabusBooks.find(b => (b.full_citation || `${b.title} ${b.author || ''}`).trim() === citation.trim() || b.book_id === data.book_id);
+            if (found) {
+              found.status = 'AVAILABLE';
+              found.color = 'blue';
+              found.source = data.source;
+              found.download_url = data.download_url;
+              found.book_id = data.book_id;
+              if (data.parsed_author) found.author = data.parsed_author;
+            }
+            updateHubHeaderBadges();
+          }
 
         } else {
-          if (cardEl) cardEl.className = 'p-3.5 rounded-xl border-2 border-amber-400 bg-amber-50/80 shadow-2xs flex flex-col justify-between space-y-2.5 transition';
+          if (cardEl) {
+            cardEl.className = 'p-3.5 rounded-xl border-2 border-amber-400 bg-amber-50/80 shadow-2xs flex flex-col justify-between space-y-2.5 transition';
+          }
+          if (statusPill) {
+            statusPill.innerHTML = `
+              <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1">
+                ⚠️ Can't Download (Copyright)
+              </span>
+            `;
+          }
           let previewHtml = '';
           if (data.preview_url) {
             previewHtml = `<a href="${data.preview_url}" target="_blank" rel="noopener noreferrer" class="text-[10px] text-blue-600 hover:underline">Read Preview/Borrow ↗</a>`;
@@ -2575,7 +2626,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 ${previewHtml}
               </div>
               <button type="button" onclick="checkAndDownloadBook('${escapeJs(citation)}', '${cardId}', true)" class="text-[10px] font-medium text-slate-500 hover:text-indigo-600 bg-slate-100 hover:bg-slate-200 px-2 py-0.5 rounded border border-slate-200 transition">
-                🔄 Retry
+                🔄 Re-Check
               </button>
             </div>
           `;
@@ -2725,10 +2776,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                 </div>
               </div>
               <div class="flex items-center gap-2 flex-wrap">
-                <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200 flex items-center gap-1">
+                <span id="hub-badge-avail-count" class="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-200 flex items-center gap-1">
                   🔵 ${availCount} Can Download
                 </span>
-                <span class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
+                <span id="hub-badge-noacc-count" class="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1">
                   🟡 ${noAccCount} Protected (Copyright)
                 </span>
                 ${availCount > 0 ? `
@@ -2818,19 +2869,21 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                   </span>
 
                                   <!-- Access Status Pill -->
-                                  ${isAvail ? `
-                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex items-center gap-1 shadow-2xs">
-                                      ✓ Can Download (${b.source === 'local_reference_book' ? 'Local Ref Book' : (b.source || 'Available')})
-                                    </span>
-                                  ` : isNoAcc ? `
-                                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1">
-                                      ⚠️ Can't Download (Copyright)
-                                    </span>
-                                  ` : `
-                                    <span class="text-[9px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
-                                      Unchecked
-                                    </span>
-                                  `}
+                                  <div id="book-status-pill-${bookCardId}">
+                                    ${isAvail ? `
+                                      <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex items-center gap-1 shadow-2xs">
+                                        ✓ Can Download (${b.source === 'local_reference_book' ? 'Local Ref Book' : (b.source || 'Available')})
+                                      </span>
+                                    ` : isNoAcc ? `
+                                      <span class="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-200 text-amber-900 border border-amber-300 flex items-center gap-1">
+                                        ⚠️ Can't Download (Copyright)
+                                      </span>
+                                    ` : `
+                                      <span class="text-[9px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
+                                        Unchecked
+                                      </span>
+                                    `}
+                                  </div>
                                 </div>
 
                                 <h5 class="font-bold text-xs ${isAvail ? 'text-blue-950 font-extrabold' : 'text-slate-900'} mt-1.5 leading-snug">
@@ -5356,13 +5409,15 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
                     return
 
+                clean_dl_url = urllib.parse.quote(download_url, safe=":/%?=&-#~")
+                out_fname = filename if filename.lower().endswith(".pdf") else (filename + ".pdf")
                 try:
                     client = httpx.Client(timeout=25.0, follow_redirects=True)
-                    resp, first_chunk = validate_pdf_stream_header(client, download_url)
+                    resp, first_chunk = validate_pdf_stream_header(client, clean_dl_url)
 
                     self.send_response(200)
                     self.send_header("Content-Type", "application/pdf")
-                    self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                    self.send_header("Content-Disposition", f'attachment; filename="{out_fname}"')
                     if "Content-Length" in resp.headers:
                         self.send_header("Content-Length", resp.headers["Content-Length"])
                     self._send_cors_headers()
@@ -5379,7 +5434,7 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     # Graceful browser redirect to download source (essential when remote host like Google Books requires browser cookies)
                     self.send_response(302)
                     self._send_cors_headers()
-                    self.send_header("Location", download_url)
+                    self.send_header("Location", clean_dl_url)
                     self.end_headers()
                     return
             except Exception as e:
@@ -5550,8 +5605,8 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     else:
                         uncached_indices.append(idx)
 
-                # 2. Check top uncached books synchronously (fast ~1.5s), and background any remainder!
-                MAX_SYNC_CHECKS = 10
+                # 2. Check top uncached books synchronously (fast ~1s), and background any remainder!
+                MAX_SYNC_CHECKS = 2
                 to_check_now = uncached_indices[:MAX_SYNC_CHECKS]
                 remaining_indices = uncached_indices[MAX_SYNC_CHECKS:]
 
