@@ -23,12 +23,17 @@ from extract_topic_pages import (
     extract_from_contents_text
 )
 
+import datetime
+import shutil
+
 PORT = 8000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploaded_syllabi")
 REF_DIR = os.path.join(BASE_DIR, "uploaded_reference_books")
+DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REF_DIR, exist_ok=True)
+os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 READER_CACHE: Dict[str, Tuple[float, PDFDocumentReader]] = {}
 _PAGE_IMAGE_CACHE: Dict[str, bytes] = {}
@@ -44,7 +49,7 @@ def resolve_pdf_path(input_path: str) -> Optional[str]:
     if os.path.isfile(cleaned):
         return os.path.abspath(cleaned)
     fname = os.path.basename(cleaned)
-    for folder in [UPLOAD_DIR, REF_DIR, BASE_DIR]:
+    for folder in [DOWNLOADS_DIR, UPLOAD_DIR, REF_DIR, BASE_DIR]:
         cand = os.path.join(folder, fname)
         if os.path.isfile(cand):
             return os.path.abspath(cand)
@@ -244,13 +249,35 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         </div>
       </div>
       <input type="file" id="sidebarRefBookInput" accept=".pdf" class="hidden" onchange="handleSidebarRefBookUpload(event)">
+
+      <!-- Downloads Navigation Item in Sidebar -->
+      <button id="sidebarDownloadsBtn" onclick="openDownloadsHub()" title="View and manage all downloaded books and PDFs" class="sidebar-nav-btn w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-700 hover:bg-slate-100 hover:text-emerald-700 transition group text-left">
+        <div class="flex items-center gap-2.5 min-w-0">
+          <span class="p-1.5 rounded-lg bg-emerald-50 text-emerald-600 group-hover:scale-110 transition shrink-0">📥</span>
+          <span class="sidebar-text truncate">Downloads</span>
+        </div>
+        <span id="sidebarDownloadsBadge" class="sidebar-text text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold shrink-0">0</span>
+      </button>
     </nav>
 
     <!-- Quick Saved Documents Section in Sidebar (Scrolls independently) -->
     <div class="flex-1 overflow-y-auto space-y-3 p-3 border-t border-slate-100 min-h-0">
       
-      <!-- Uploaded Reference Books in Sidebar -->
+      <!-- Downloaded Books & PDFs in Sidebar -->
       <div class="space-y-1">
+        <div class="flex justify-between items-center px-1">
+          <span class="sidebar-text text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1">
+            <span>📥</span> Downloads
+          </span>
+          <span class="sidebar-text text-[10px] text-emerald-700 font-mono" id="sidebarDownloadsCount">0</span>
+        </div>
+        <div id="sidebarDownloadsList" class="space-y-1">
+          <div class="text-[11px] text-slate-400 italic px-2 py-1 sidebar-text">Loading downloads...</div>
+        </div>
+      </div>
+
+      <!-- Uploaded Reference Books in Sidebar -->
+      <div class="space-y-1 pt-2 border-t border-slate-100">
         <div class="flex justify-between items-center px-1">
           <span class="sidebar-text text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1">
             <span>📚</span> Reference Books
@@ -792,6 +819,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     // -------------------------------------------------------------
     let savedDocsList = [];
     let savedRefBooksList = [];
+    let savedDownloadsList = [];
 
     function resetSearchAndResultsToNew() {
       // 1. Clear global syllabus search input and hide dropdown
@@ -904,14 +932,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             try { history.replaceState(null, '', window.location.pathname); } catch(e) {}
           }
           resetSearchAndResultsToNew();
+          await fetchDownloads();
           return; // Start clean: do not restore old search views or drilldowns!
         }
+
+        await fetchDownloads();
 
         // Within the active session: Restore user's view if navigating within the app
         const hash = window.location.hash || '';
         const savedView = localStorage.getItem('active_app_view') || 'task1';
 
-        if (hash.startsWith('#books_hub') || savedView === 'books_hub') {
+        if (hash.startsWith('#downloads') || savedView === 'downloads_hub') {
+          await openDownloadsHub(false);
+        } else if (hash.startsWith('#books_hub') || savedView === 'books_hub') {
           if (localFilePath) {
             await openSyllabusBooksHub(localFilePath, currentDocLabel, false);
           } else {
@@ -945,6 +978,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
       if (state.view === 'task1') {
         backToTask1(false);
+      } else if (state.view === 'downloads_hub') {
+        openDownloadsHub(false);
       } else if (state.view === 'task2' && state.code) {
         drilldownCourse(state.code, state.page || null, false);
       } else if (state.view === 'books_hub') {
@@ -965,6 +1000,255 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         restorePreviousSession();
       }
     });
+
+    // -------------------------------------------------------------
+    // Downloads Hub & Management Handlers
+    // -------------------------------------------------------------
+    let currentDownloadsFilter = '';
+
+    async function fetchDownloads() {
+      try {
+        const res = await fetch('/api/downloads');
+        const data = await res.json();
+        savedDownloadsList = (data && data.downloads) || [];
+        renderSidebarDownloads(savedDownloadsList, (data && data.total_size_mb) || 0);
+        return data;
+      } catch (e) {
+        console.error('Failed to fetch downloads', e);
+        return { downloads: [], total_count: 0, total_size_mb: 0 };
+      }
+    }
+
+    function renderSidebarDownloads(downloads, totalMb = 0) {
+      const badge = document.getElementById('sidebarDownloadsBadge');
+      const count = document.getElementById('sidebarDownloadsCount');
+      const list = document.getElementById('sidebarDownloadsList');
+      const countVal = (downloads && downloads.length) || 0;
+
+      if (badge) badge.innerText = countVal;
+      if (count) count.innerText = `${countVal} ${countVal === 1 ? 'file' : 'files'}`;
+
+      if (list) {
+        if (!downloads || downloads.length === 0) {
+          list.innerHTML = '<div class="text-[11px] text-slate-400 italic px-2 py-1 sidebar-text">No downloads yet</div>';
+        } else {
+          list.innerHTML = '';
+          downloads.slice(0, 8).forEach(item => {
+            const isSel = (currentViewerPdf === item.path || currentViewerPdf === item.name);
+            const btn = document.createElement('button');
+            btn.className = `w-full text-left p-1.5 rounded-lg text-[11px] font-medium flex items-center justify-between transition group ${
+              isSel ? 'bg-emerald-50 text-emerald-800 font-bold border border-emerald-200' : 'hover:bg-slate-50 text-slate-700'
+            }`;
+            btn.title = `${item.name} (${item.size_mb} MB) - Click to view in PDF viewer`;
+            btn.innerHTML = `
+              <div class="flex items-center gap-2 min-w-0 flex-1">
+                <span class="text-xs shrink-0 text-emerald-600">📥</span>
+                <span class="sidebar-text truncate">${escapeJs(item.title || item.name)}</span>
+              </div>
+              <span class="sidebar-text text-[9px] text-emerald-600 font-mono shrink-0 pl-1">${item.size_mb}M</span>
+            `;
+            btn.onclick = () => {
+              loadPdfInViewer(item.path, 1, `Downloaded: ${item.name}`);
+              renderSidebarDownloads(savedDownloadsList);
+            };
+            list.appendChild(btn);
+          });
+        }
+      }
+    }
+
+    async function openDownloadsHub(pushHistory = true) {
+      localStorage.setItem('active_app_view', 'downloads_hub');
+      if (pushHistory) {
+        history.pushState({ view: 'downloads_hub' }, '', '#downloads');
+      }
+
+      // Ensure results container is open so renderedView is visible
+      const results = document.getElementById('resultsContainer');
+      if (results) results.classList.remove('hidden');
+
+      // Set sidebar active state
+      document.querySelectorAll('.sidebar-nav-btn').forEach(b => b.classList.remove('bg-emerald-50', 'text-emerald-700', 'font-bold'));
+      const navBtn = document.getElementById('sidebarDownloadsBtn');
+      if (navBtn) navBtn.classList.add('bg-emerald-50', 'text-emerald-700', 'font-bold');
+
+      const data = await fetchDownloads();
+      renderDownloadsHub(data);
+    }
+
+    function renderDownloadsHub(data) {
+      const container = document.getElementById('renderedView');
+      if (!container) return;
+
+      const downloads = (data && data.downloads) || [];
+      const totalCount = (data && data.total_count) || downloads.length;
+      const totalMb = (data && data.total_size_mb) || 0;
+
+      container.innerHTML = `
+        <div class="space-y-6">
+          <!-- Downloads Header Banner -->
+          <div class="bg-gradient-to-r from-emerald-950 via-teal-900 to-slate-900 rounded-3xl p-6 text-white shadow-xl space-y-4 border border-emerald-800/40">
+            <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+              <div>
+                <div class="flex items-center gap-2.5">
+                  <span class="text-3xl p-2 rounded-2xl bg-emerald-500/20 border border-emerald-400/30">📥</span>
+                  <div>
+                    <div class="flex items-center gap-2.5">
+                      <h2 class="text-xl md:text-2xl font-black tracking-tight text-white">Downloads Hub</h2>
+                      <span class="bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 text-xs px-2.5 py-0.5 rounded-full font-bold">
+                        ${totalCount} ${totalCount === 1 ? 'PDF' : 'PDFs'}
+                      </span>
+                    </div>
+                    <p class="text-xs text-emerald-200/80 mt-1">
+                      All reference books and textbooks downloaded by the application are permanently saved here on your computer.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <button onclick="backToTask1()" class="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition flex items-center gap-1.5">
+                  <span>←</span> Back to Dashboard
+                </button>
+                <button onclick="openDownloadsHub(false)" class="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-sm active:scale-95">
+                  <span>🔄</span> Refresh
+                </button>
+              </div>
+            </div>
+
+            <!-- Stats Bar -->
+            <div class="flex flex-wrap items-center gap-3 pt-3 border-t border-white/10 text-xs">
+              <div class="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl border border-white/10">
+                <span class="text-emerald-400 font-bold">📁 Storage Directory:</span>
+                <code class="text-slate-300 text-[11px] font-mono">MODEL/downloads/</code>
+              </div>
+              <div class="flex items-center gap-2 bg-black/30 px-3 py-1.5 rounded-xl border border-white/10">
+                <span class="text-emerald-400 font-bold">💾 Total Space Used:</span>
+                <span class="text-white font-semibold">${totalMb} MB</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Search & Filter Bar -->
+          <div class="bg-white border border-slate-200 rounded-2xl p-3.5 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div class="relative flex-1 w-full">
+              <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400 text-sm">
+                🔍
+              </div>
+              <input type="text" id="downloadsSearchInput" value="${escapeJs(currentDownloadsFilter)}" oninput="filterDownloadsList(this.value)" placeholder="Search downloaded books by title..." class="w-full text-xs font-semibold p-2.5 pl-9 pr-8 rounded-xl bg-slate-50 text-slate-900 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+            </div>
+            <span class="text-xs text-slate-500 font-medium whitespace-nowrap" id="downloadsFilterCount">
+              Showing ${downloads.length} ${downloads.length === 1 ? 'file' : 'files'}
+            </span>
+          </div>
+
+          <!-- Downloads List / Grid -->
+          <div id="downloadsGrid" class="space-y-3">
+            ${renderDownloadsCardsHtml(downloads)}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDownloadsCardsHtml(downloads) {
+      if (!downloads || downloads.length === 0) {
+        return `
+          <div class="p-12 text-center bg-white rounded-3xl border border-slate-200 shadow-sm space-y-3">
+            <div class="text-4xl text-slate-300">📥</div>
+            <h4 class="font-bold text-slate-800 text-base">No downloaded books yet</h4>
+            <p class="text-xs text-slate-500 max-w-md mx-auto">
+              When you download textbooks or reference books from the Syllabus Books Hub or Course Cards, they will automatically appear here!
+            </p>
+            <div class="pt-2">
+              <button onclick="openCurrentSyllabusBooksHub()" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition shadow-sm">
+                <span>📚</span> Browse Reference Books in Syllabus
+              </button>
+            </div>
+          </div>
+        `;
+      }
+
+      return downloads.map((item) => `
+        <div class="bg-white border border-slate-200 hover:border-emerald-300 rounded-2xl p-4 shadow-sm hover:shadow-md transition space-y-3 group download-card" data-title="${escapeJs(item.title || item.name).toLowerCase()}">
+          <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+            <div class="flex items-start gap-3 min-w-0 flex-1">
+              <div class="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center font-bold text-lg shrink-0 shadow-2xs">
+                📄
+              </div>
+              <div class="min-w-0 flex-1">
+                <h4 class="font-bold text-sm text-slate-900 hover:text-emerald-700 transition cursor-pointer truncate" onclick="loadPdfInViewer('${escapeJs(item.path)}', 1, '${escapeJs(item.name)}')">
+                  ${escapeJs(item.title || item.name)}
+                </h4>
+                <div class="flex flex-wrap items-center gap-2 mt-1 text-[11px] text-slate-500">
+                  <span class="font-mono text-slate-400 truncate max-w-xs" title="${escapeJs(item.name)}">${escapeJs(item.name)}</span>
+                  <span class="text-slate-300">•</span>
+                  <span class="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-bold text-[10px] border border-emerald-200">
+                    💾 ${item.size_mb} MB
+                  </span>
+                  <span class="text-slate-300">•</span>
+                  <span class="text-slate-400 text-[10px]">Downloaded: ${escapeJs(item.downloaded_at || 'Recently')}</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Action Buttons for this Downloaded File -->
+            <div class="flex flex-wrap items-center gap-1.5 shrink-0 w-full sm:w-auto justify-end">
+              <button onclick="loadPdfInViewer('${escapeJs(item.path)}', 1, '${escapeJs(item.name)}')" class="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-xs transition flex items-center gap-1 border border-blue-200 active:scale-95" title="Read this PDF in the interactive viewer">
+                <span>📖</span> Read in Viewer
+              </button>
+              <button onclick="openReferenceBookWorkspace('${escapeJs(item.path)}', null, true)" class="px-3 py-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold text-xs transition flex items-center gap-1 border border-indigo-200 active:scale-95" title="Search topics & chapters in this textbook">
+                <span>🔎</span> Page Locator
+              </button>
+              <a href="${item.download_url}" download="${escapeJs(item.name)}" class="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs transition flex items-center gap-1 active:scale-95" title="Save another copy to computer">
+                <span>⬇️</span> Save File
+              </a>
+              <button onclick="deleteDownloadedPdf('${escapeJs(item.name)}')" class="p-1.5 rounded-lg hover:bg-rose-50 text-slate-400 hover:text-rose-600 transition text-xs font-bold" title="Delete from downloads">
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function filterDownloadsList(query) {
+      currentDownloadsFilter = query;
+      const q = (query || '').toLowerCase().trim();
+      const cards = document.querySelectorAll('.download-card');
+      let visible = 0;
+      cards.forEach(c => {
+        const title = c.getAttribute('data-title') || '';
+        const match = !q || title.includes(q);
+        c.classList.toggle('hidden', !match);
+        if (match) visible++;
+      });
+      const countLabel = document.getElementById('downloadsFilterCount');
+      if (countLabel) {
+        countLabel.innerText = `Showing ${visible} of ${cards.length} files`;
+      }
+    }
+
+    async function deleteDownloadedPdf(filename) {
+      if (!confirm(`Are you sure you want to remove "${filename}" from your downloads?`)) {
+        return;
+      }
+      try {
+        const res = await fetch('/api/downloads/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: filename })
+        });
+        const data = await res.json();
+        if (data.success) {
+          const fresh = await fetchDownloads();
+          renderDownloadsHub(fresh);
+        } else {
+          alert(data.error || 'Failed to delete file');
+        }
+      } catch (e) {
+        alert('Network error while deleting file');
+      }
+    }
 
     // -------------------------------------------------------------
     // User Profile & Login Handlers
@@ -2635,7 +2919,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
           container.innerHTML = `
             <div class="space-y-2 w-full pt-1">
-              <a href="${dlUrl}" download="${escapeJs(safeTitle)}.pdf" class="w-full text-[11px] font-bold py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+              <a href="${dlUrl}" onclick="setTimeout(() => { if (typeof fetchDownloads === 'function') fetchDownloads(); }, 2000)" download="${escapeJs(safeTitle)}.pdf" class="w-full text-[11px] font-bold py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
                 <span>📥 Download Book PDF</span>
               </a>
               <div class="flex items-center justify-between text-[10px] text-slate-500 px-1">
@@ -2649,6 +2933,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 
           // Automatic safe download
           triggerSafeDownload(dlUrl, safeTitle + '.pdf');
+          setTimeout(() => { if (typeof fetchDownloads === 'function') fetchDownloads(); }, 1500);
 
           // Update in-memory data and hub counters
           if (Array.isArray(currentSyllabusBooks)) {
@@ -2967,7 +3252,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                               <!-- Action Box -->
                               <div id="book-access-box-${bookCardId}" class="pt-2 border-t ${isAvail ? 'border-blue-200' : isNoAcc ? 'border-amber-200' : 'border-slate-100'}">
                                 ${isAvail ? `
-                                  <a href="/api/download/${b.book_id}" download="${escapeJs(b.title || 'textbook')}.pdf" class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
+                                  <a href="/api/download/${b.book_id}" onclick="setTimeout(() => { if (typeof fetchDownloads === 'function') fetchDownloads(); }, 2000)" download="${escapeJs(b.title || 'textbook')}.pdf" class="w-full text-[11px] font-bold py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95">
                                     <span>📥 Download Book PDF</span>
                                   </a>
                                 ` : isNoAcc ? `
@@ -5672,6 +5957,40 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                             "path": full_p
                         })
             self._send_json(books)
+        elif parsed.path == "/api/downloads":
+            try:
+                items = []
+                total_bytes = 0
+                if os.path.exists(DOWNLOADS_DIR):
+                    for f in sorted(os.listdir(DOWNLOADS_DIR)):
+                        if f.lower().endswith(".pdf") and not f.startswith("."):
+                            full_p = os.path.join(DOWNLOADS_DIR, f)
+                            if os.path.isfile(full_p):
+                                sz = os.path.getsize(full_p)
+                                total_bytes += sz
+                                sz_mb = round(sz / (1024 * 1024), 2)
+                                mtime = os.path.getmtime(full_p)
+                                dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%b %d, %Y %H:%M")
+                                items.append({
+                                    "name": f,
+                                    "title": f[:-4] if f.lower().endswith(".pdf") else f,
+                                    "size_mb": sz_mb,
+                                    "size_bytes": sz,
+                                    "path": full_p,
+                                    "downloaded_at": dt_str,
+                                    "download_url": f"/api/download-file?file={urllib.parse.quote(f)}"
+                                })
+                items.sort(key=lambda x: x.get("size_bytes", 0), reverse=True)
+                total_mb = round(total_bytes / (1024 * 1024), 2)
+                self._send_json({
+                    "downloads": items,
+                    "total_count": len(items),
+                    "total_size_mb": total_mb,
+                    "folder": "downloads"
+                })
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
         elif parsed.path == "/api/syllabus-books":
             params = urllib.parse.parse_qs(parsed.query)
             pdf_path = params.get("pdf", [""])[0]
@@ -5969,6 +6288,25 @@ class SyllabusAPIHandler(http.server.BaseHTTPRequestHandler):
                     "file_size_bytes": result.file_size_bytes,
                     "reason": result.reason
                 })
+            except Exception as e:
+                self._send_json({"error": str(e)}, 500)
+            return
+        elif self.path == "/api/downloads/delete":
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                post_body = self.rfile.read(content_len)
+                data = json.loads(post_body.decode("utf-8"))
+                filename = data.get("file", "").strip()
+                if not filename:
+                    self._send_json({"error": "No file specified"}, 400)
+                    return
+                clean_name = os.path.basename(filename)
+                target_path = os.path.join(DOWNLOADS_DIR, clean_name)
+                if os.path.isfile(target_path):
+                    os.remove(target_path)
+                    self._send_json({"success": True, "deleted": clean_name})
+                else:
+                    self._send_json({"error": "File not found"}, 404)
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return

@@ -18,6 +18,8 @@ uploaded_syllabi/*.pdf
 !uploaded_syllabi/.gitkeep
 uploaded_reference_books/*.pdf
 !uploaded_reference_books/.gitkeep
+downloads/*.pdf
+!downloads/.gitkeep
 
 # Caches and scratch
 .cache/
