@@ -855,8 +855,15 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         } else if (hash.startsWith('#locator') || savedView === 'locator') {
           await openReferenceBookWorkspace(currentRefBookPath, null, false);
         } else if (localFilePath) {
-          // Default to Task 1: auto-discover courses so user never sees a blank dropzone
-          uploadAndExtract('', 'discover');
+          // If we had previously cached courses, show them without triggering a new extraction process
+          const cached = localStorage.getItem('cached_discovered_' + localFilePath);
+          if (cached) {
+            try {
+              lastDiscoveredData = JSON.parse(cached);
+              renderTask1(lastDiscoveredData);
+              document.getElementById('resultsContainer')?.classList.remove('hidden');
+            } catch(e) {}
+          }
         }
       } catch (err) {
         console.error('Session restore error:', err);
@@ -1119,7 +1126,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
               isSel ? 'bg-blue-50 text-blue-700 font-bold' : 'hover:bg-slate-50 text-slate-700'
             }`;
             item.title = `${doc.name} (${doc.size_mb} MB)`;
-            item.onclick = () => selectSavedDoc(doc);
+            item.onclick = () => selectSavedDoc(doc, false);
             item.innerHTML = `
               <span class="truncate flex items-center gap-1.5 min-w-0">
                 <span class="text-xs shrink-0">📑</span>
@@ -1158,19 +1165,17 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         `;
         card.onclick = (e) => {
           if (e.target.tagName.toLowerCase() === 'button') return;
-          selectSavedDoc(doc);
+          selectSavedDoc(doc, false);
         };
         list.appendChild(card);
       });
     }
 
-    function selectSavedDoc(doc, autoDiscover = true) {
+    function selectSavedDoc(doc, autoDiscover = false) {
       selectedFile = null;
       localFilePath = doc.path;
       currentDocLabel = doc.name;
       localStorage.setItem('selected_syllabus_path', doc.path);
-      localStorage.setItem('active_app_view', 'task1');
-      history.pushState({ view: 'task1', path: doc.path }, '', '#task1');
       clearStatus();
 
       const fileInput = document.getElementById('pdfFileInput');
@@ -1179,12 +1184,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       const fileBadge = document.getElementById('selectedFileName');
       if (fileBadge) {
         fileBadge.classList.remove('hidden');
-        fileBadge.innerText = `✓ Stored File Selected: ${doc.name} (${doc.size_mb} MB)`;
+        fileBadge.innerText = `✓ Selected: ${doc.name} (${doc.size_mb} MB) · Click "Discover All Courses" below to extract`;
       }
 
       fetchSavedDocuments(false);
       if (typeof loadPdfInViewer === 'function') {
         loadPdfInViewer(doc.path, 1, `Selected ${doc.name}`);
+      }
+
+      // Check if courses were already cached for this syllabus
+      const cached = localStorage.getItem('cached_discovered_' + doc.path);
+      if (cached) {
+        try {
+          lastDiscoveredData = JSON.parse(cached);
+        } catch (e) {}
+      }
+
+      // Highlight the Discover All Courses button to clearly prompt the user to start when ready
+      const discoverBtn = document.getElementById('discoverBtn');
+      if (discoverBtn) {
+        discoverBtn.classList.add('ring-4', 'ring-blue-300');
+        setTimeout(() => discoverBtn.classList.remove('ring-4', 'ring-blue-300'), 1200);
       }
 
       if (autoDiscover) {
